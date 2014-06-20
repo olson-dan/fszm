@@ -2,28 +2,30 @@
 
 open System
 
+let make_short a b = ((a &&& 0xff) <<< 8) ||| (b &&& 0xff)
+
 type zstring_shift = ZShiftZero | ZShiftOne | ZShiftTwo
 let decode_zstring zs =
-	let triplet a b = let v = (a <<< 8) ||| b in
-		[(v >>> 10) &&& 0x1f; (v >>> 5) &&& 0x1f; v &&& 0x1f] in
+	let triplet v = [(v >>> 10) &&& 0x1f; (v >>> 5) &&& 0x1f; v &&& 0x1f] in
 	let rec decode bytes = function
-		| a :: b :: tail -> decode (bytes @ (triplet a b)) tail
-		| a :: tail -> decode (bytes @ (triplet a 0)) tail
+		| a :: b :: tail -> decode (bytes @ (triplet (make_short a b))) (if (a &&& 0x80) = 0 then tail else [])
+		| a :: tail -> decode (bytes @ (triplet (make_short a 0))) (if (a &&& 0x80) = 0 then tail else [])
 		| [] -> bytes in
 	let rec to_char shift str = function
 		| 0 :: tail -> to_char shift (str + " ") tail
 		| a :: tail when a > 0 && a < 4 -> to_char shift str tail // abbrevs, do later.
 		| 4 :: tail -> to_char ZShiftOne str tail
 		| 5 :: tail -> to_char ZShiftTwo str tail
-		| 6 :: a :: b :: tail when shift = ZShiftTwo -> let x = (a <<< 8 ) ||| b in
+		| 6 :: a :: b :: tail when shift = ZShiftTwo -> let x = (a <<< 5) ||| b in
 			to_char shift (str + Char.ConvertFromUtf32(x).ToString()) tail
-		| a :: tail -> let x =
+		| a :: tail when a > 6 && a < 32 -> let x =
 			(match shift with
 			| ZShiftZero -> "______abcdefghijklmnopqrstuvwxyz"
 			| ZShiftOne -> "______ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 			| ZShiftTwo -> "______^\n0123456789.,!?_#\'\"/\\-:()") |> Seq.nth a in
 			to_char ZShiftZero (str + x.ToString()) tail
-		| [] -> str in
+		| [] -> str
+		| _ -> failwith "Error decoding zstring" in
 	zs |> decode [] |> to_char ZShiftZero ""
 
 do 
