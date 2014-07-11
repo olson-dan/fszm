@@ -96,36 +96,25 @@ module ZInstruction = begin
 		| OperandVariable(x) -> 1
 		| OperandOmitted -> 0
 
+	let stores instruction =
+		match instruction with
+		| Instruction2Op(opcode,arg0,arg1,ret) ->
+			(opcode >= 0x08uy && opcode <= 0x09uy) ||
+			(opcode >= 0x09uy && opcode <= 0x19uy)
+		| Instruction1Op(opcode,arg0,ret) ->
+			(opcode >= 0x01uy && opcode <= 0x04uy) ||
+			opcode = 0x08uy ||
+			(opcode >= 0x0euy && opcode <= 0x0fuy)
+		| InstructionVar(opcode,args,ret) ->
+			opcode = 0x0uy
+		| _ -> false
+
 	let add_return instruction op =
 		match instruction with
-		| InstructionVar(opcode,args,ret) -> InstructionVar(opcode,args,Some(op))
 		| Instruction1Op(opcode,arg0,ret) -> Instruction1Op(opcode,arg0,Some(op))
 		| Instruction2Op(opcode,arg0,arg1,ret) -> Instruction2Op(opcode,arg0,arg1,Some(op))
+		| InstructionVar(opcode,args,ret) -> InstructionVar(opcode,args,Some(op))
 		| _ -> instruction
-
-	let rec print str ret = function
-		| h :: t -> print (str + (match h with
-		    | OperandLarge(x) -> sprintf "#%04x," x
-			| OperandSmall(x) -> sprintf "#%02x," x
-			| OperandVariable(x) when x = 0uy -> "(SP)+,"
-			| OperandVariable(x) when x >= 0x10uy -> sprintf "G%02x," (x - 0x10uy)
-			| OperandVariable(x) -> sprintf "L%02x" (x - 1uy)
-			| OperandOmitted -> "")) ret t
-		| [] -> str + (match ret with
-			| Some(x) when x = 0uy -> " -> -(SP)"
-			| Some(x) when x >= 0x10uy -> sprintf " -> G%02x" (x - 0x10uy)
-			| Some(x) -> sprintf " -> L%02x" (x - 1uy)
-		    | None -> "")
-
-	let disassemble inst =
-		match inst with
-		| InstructionVar(00uy,args,ret) -> print "CALL " ret args
-		| InstructionVar(01uy,args,ret) -> print "STOREW " ret args
-		| InstructionVar(02uy,args,ret) -> print "STOREB " ret args
-		| Instruction0Op(opcode) -> failwith <| sprintf "unimplemented 0op %A" opcode
-		| Instruction1Op(opcode, arg0,ret) -> failwith <| sprintf "unimplemented 1op %A" opcode
-		| Instruction2Op(opcode, arg0, arg1, ret) -> failwith <| sprintf "unimplmented 2op %A" opcode
-		| InstructionVar(opcode, args, ret) -> failwith <| sprintf "unimplemented var %A" opcode
 
 	let decode_var (bytes : byte []) i op =
 		let opcode = (op &&& 0x1fuy) in
@@ -155,18 +144,50 @@ module ZInstruction = begin
 	let decode_long bytes i op =
 		let opcode = (op &&& 0x1fuy) in
 		2, Instruction2Op(opcode,
-		    to_operand bytes (i+0) (if (op &&& 0x40uy) <> 0uy then 0x01uy else 0x02uy),
+			to_operand bytes (i+0) (if (op &&& 0x40uy) <> 0uy then 0x01uy else 0x02uy),
 			to_operand bytes (i+1) (if (op &&& 0x20uy) <> 0uy then 0x01uy else 0x02uy), None)
 
 	let decode_operand (bytes : byte[]) i =
-		//printfn "%A" (i, seq { for x in bytes.[i..i+8] -> sprintf "%x" x } |> Seq.toList);
 		let op = bytes.[i] in
 		let form = (op &&& 0xc0uy) >>> 6 in
 		let size, instruction = match form with
 		| 0x03uy -> decode_var bytes (i+1) op
 		| 0x02uy -> decode_short bytes (i+1) op
 		| _ -> decode_long bytes (i+1) op in
-		size + 1, add_return instruction 0uy
+		//printfn "%A" (i, seq { for x in bytes.[i..i+size] -> sprintf "%x" x } |> Seq.toList);
+		if stores instruction then
+			size + 1, add_return instruction bytes.[i+size+1]
+		else
+			size, instruction
+
+	let string_from_operand = function
+		| OperandLarge(x) -> sprintf "#%04x" x
+		| OperandSmall(x) -> sprintf "#%02x" x
+		| OperandVariable(x) when x = 0uy -> "(SP)+"
+		| OperandVariable(x) when x >= 0x10uy -> sprintf "G%02x" (x - 0x10uy)
+		| OperandVariable(x) -> sprintf "L%02x" (x - 1uy)
+		| OperandOmitted -> ""
+
+	let rec print str ret = function
+		| h :: g :: t -> print (str + (string_from_operand h) + ",") ret (g :: t)
+		| h :: t -> print (str + (string_from_operand h)) ret t
+		| [] -> str + (match ret with
+			| Some(x) when x = 0uy -> " -> -(SP)"
+			| Some(x) when x >= 0x10uy -> sprintf " -> G%02x" (x - 0x10uy)
+			| Some(x) -> sprintf " -> L%02x" (x - 1uy)
+			| None -> "")
+
+	let names_0op = [| "rtrue"; "rfalse"; "print"; "print_ret"; "no"; "save"; "restore"; "restart"; "ret_popped"; "pop"; "quit"; "new_line"; "show_status"; "verify"; "extended"; "piracy" |]
+	let names_1op = [| "jz"; "get_sibling"; "get_child"; "get_parent"; "get_prop_len"; "inc"; "dec"; "print_addr"; "call_1s"; "remove_obj"; "print_obj"; "ret"; "jump"; "print_paddr"; "load"; "not"; "call_1n" |]
+	let names_2op = [| "none"; "je"; "jl"; "jg"; "dec_chk"; "inc_chk"; "jin"; "test"; "or"; "and"; "test_attr"; "set_attr"; "clear_attr"; "store"; "insert_obj"; "loadw"; "loadb"; "get_prop"; "get_prop_addr"; "get_next_prop"; "add"; "sub"; "mul"; "div"; "mod"; "call_2s"; "call_2n"; "set_colour"; "throw" |]
+	let names_var = [| "call"; "storew"; "storeb"; "put_prop"; "sread"; "print_char"; "print_num"; "random"; "push"; "pull"; "split_window"; "set_window"; "call_vs2"; "erase_window"; "erase_line"; "set_cursor"; "get_cursor"; "set_text_style"; "buffer_mode"; "output_stream"; "input_stream"; "sound_effect"; "read_char"; "scan_table"; "not_v4"; "call_vn"; "call_vn2"; "tokenise"; "encode_text"; "copy_table"; "print_table"; "check_arg_count" |]
+
+	let disassemble inst =
+		match inst with
+		| Instruction0Op(opcode) -> print (names_0op.[int opcode].ToUpper() + "\t") None []
+		| Instruction1Op(opcode, arg0, ret) -> print (names_1op.[int opcode].ToUpper() + "\t") ret [arg0]
+		| Instruction2Op(opcode, arg0, arg1, ret) -> print (names_2op.[int opcode].ToUpper() + "\t") ret [arg0; arg1]
+		| InstructionVar(opcode, args, ret) -> print (names_var.[int opcode].ToUpper() + "\t") ret args
 end
 
 let toUintSeq (bytes : byte []) =
@@ -175,9 +196,12 @@ let toUintSeq (bytes : byte []) =
 
 do
 	let story = ZStory "zork.z3" in
-	let size, inst = ZInstruction.decode_operand story.Bytes story.IP in
-	printfn "%A" (size, inst);
-	printfn "%s" (ZInstruction.disassemble inst);
+	let rec step ip count =
+		if count = 0 then () else
+		let size, inst = ZInstruction.decode_operand story.Bytes ip in
+		printfn "%s" (ZInstruction.disassemble inst);
+		step (ip + size + 1) (count - 1) in
+	step story.IP 10;
 	//let data = [|0x5duy; 0x2auy; 0x24uy; 0x0buy; 0x5euy; 0x93uy; 0x64uy; 0x09uy; 0x52uy; 0x97uy; 0x96uy; 0x45uy|] in
 	//let results = data |> Seq.toList |> decode_zstring in
 	//let results = data |> ZString.ToString in
