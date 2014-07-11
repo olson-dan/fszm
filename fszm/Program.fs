@@ -144,8 +144,8 @@ module ZInstruction = begin
 	let decode_long bytes i op =
 		let opcode = (op &&& 0x1fuy) in
 		2, Instruction2Op(opcode,
-			to_operand bytes (i+0) (if (op &&& 0x40uy) <> 0uy then 0x01uy else 0x02uy),
-			to_operand bytes (i+1) (if (op &&& 0x20uy) <> 0uy then 0x01uy else 0x02uy), None)
+			to_operand bytes (i+0) (if (op &&& 0x40uy) <> 0uy then 0x02uy else 0x01uy),
+			to_operand bytes (i+1) (if (op &&& 0x20uy) <> 0uy then 0x02uy else 0x01uy), None)
 
 	let decode_operand (bytes : byte[]) i =
 		let op = bytes.[i] in
