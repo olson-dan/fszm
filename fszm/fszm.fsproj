@@ -26,6 +26,7 @@
     <DocumentationFile>bin\Debug\fszm.XML</DocumentationFile>
     <Prefer32Bit>true</Prefer32Bit>
     <StartWorkingDirectory>C:\Users\Dan\Documents\Visual Studio 2013\Projects\fszm\</StartWorkingDirectory>
+    <NoWarn>62</NoWarn>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
     <DebugType>pdbonly</DebugType>
