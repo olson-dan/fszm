@@ -10,8 +10,10 @@ let emptyString = { s=""; length=0; shift=ShiftZero }
 
 type operand = Large of uint16 | Small of byte | Variable of byte | Omitted
 type encoding = Op0 | Op1 | Op2 | Var
-type instruction = { opcode:int; optype:encoding; length:int; args:operand array; ret:operand; string:string; offset:int }
-let emptyInstruction = {opcode=0; optype=Op0; length=0; args=[||]; ret=Omitted; string=""; offset=0 }
+type instruction = { opcode:int; optype:encoding; length:int; args:operand array; ret:operand; string:string; offset:int; compare:bool }
+let emptyInstruction = {opcode=0; optype=Op0; length=0; args=[||]; ret=Omitted; string=""; offset=0; compare=false }
+
+let debugPrint x = printfn "%A" x; x
 
 type Story(filename) = class
 	let mem = File.ReadAllBytes(filename)
@@ -62,8 +64,10 @@ type Story(filename) = class
 	let high_end = mem.Length
 	let globals = _read16 0xc |> int
 
-	let stack = Stack<uint16>()
+	let mutable (stack:uint16 array) = [| |]
 	let routine_stack = Stack<int * int * int * operand * int>()
+	let _push x = stack <- Array.append stack [| x |]
+	let _pop () = let x = stack.[stack.Length-1] in stack <- stack.[0..stack.Length-2]; x
 
 	let _addr x = dynamic_start + (x |> int)
 	let _paddr x = dynamic_start + (x * 2us |> int)
@@ -71,26 +75,29 @@ type Story(filename) = class
 	let _writeGlobal v x = globals + (x - 0x10uy |> uint16 |> _paddr) |> _write16 v
 
 	let _readLocal x = let addr, stack_start, numlocals, return_storage, return_addr = routine_stack.Peek() in
-		let s, i = stack.ToArray(), stack_start + (x |> int) - 1 in s.[i]
+		let i = stack_start + (x |> int) - 1 in stack.[i] 
 	let _writeLocal v x = let addr, stack_start, numlocals, return_storage, return_addr = routine_stack.Peek() in
-		let s, i = stack.ToArray(), stack_start + (x |> int) - 1 in s.SetValue(v, x |> int)
+		let i = stack_start + (x |> int) - 1 in stack.SetValue(v,i)
 
 	let _readVariable = function
 		| x when x >= 0x10uy -> _readGlobal x
-		| x when x = 0uy -> stack.Pop()
+		| x when x = 0uy -> _pop ()
 		| x -> _readLocal x
 
 	let _writeVariable v = function
 		| x when x >= 0x10uy -> _writeGlobal v x
-		| x when x = 0uy -> stack.Push(v)
+		| x when x = 0uy -> _push v
 		| x -> _writeLocal v x
 
 	member this.read8 = _read8
 	member this.read16 = _read16
+	member this.write8 = _write8
+	member this.write16 = _write16
 	member this.readString = _readString
 	member this.readVariable = _readVariable
 	member this.writeVariable = _writeVariable
 	member this.paddr = _paddr
+	member this.thestack = stack
 
 	member this.vin = function
 		| Variable(x) -> _readVariable x
@@ -102,17 +109,17 @@ type Story(filename) = class
 
 	member this.call addr retaddr retdata (args:uint16 array) =
 		if addr - dynamic_start = 0 then (this.vout retdata 0us; retaddr) else
-		let args_start = stack.Count in
+		let args_start = stack.Length in
 		let numlocals = _read8 addr |> int in
 		routine_stack.Push(addr, args_start, numlocals, retdata, retaddr);
-		for i in 0 .. numlocals do
-			stack.Push(if i < args.Length then args.[i] else _read16 (addr + 1 + i * 2))
+		for i in 0 .. (numlocals-1) do
+			_push (if i < args.Length then args.[i] else _read16 (addr + 1 + i * 2))
 		done;
 		addr + 1 + numlocals * 2
 
 	member this.ret retval =
 		let addr, args_start, numlocals, retdata, retaddr = routine_stack.Pop() in
-		while stack.Count <> args_start do stack.Pop() |> ignore done;
+		while stack.Length <> args_start do _pop () |> ignore done;
 		this.vout retdata retval;
 		retaddr
 end
@@ -125,6 +132,13 @@ type Machine(filename) = class
 	let mutable _in = fun _ -> Console.ReadLine()
 	let mutable _out = fun (x:string) -> printf "%s" x
 
+	let jump (i:instruction) x =
+		if x = i.compare then ip <- (match i.offset with
+		| 0 -> s.ret 0us
+		| 1 -> s.ret 1us
+		| x -> ip + i.length + i.offset - 2)
+		else ()
+
 	let names0op = [| "rtrue"; "rfalse"; "print"; "print_ret"; "no"; "save"; "restore"; "restart"; "ret_popped"; "pop"; "quit"; "new_line"; "show_status"; "verify"; "extended"; "piracy" |]
 	let names1op = [| "jz"; "get_sibling"; "get_child"; "get_parent"; "get_prop_len"; "inc"; "dec"; "print_addr"; "call_1s"; "remove_obj"; "print_obj"; "ret"; "jump"; "print_paddr"; "load"; "not"; "call_1n" |]
 	let names2op = [| "none"; "je"; "jl"; "jg"; "dec_chk"; "inc_chk"; "jin"; "test"; "or"; "and"; "test_attr"; "set_attr"; "clear_attr"; "store"; "insert_obj"; "loadw"; "loadb"; "get_prop"; "get_prop_addr"; "get_next_prop"; "add"; "sub"; "mul"; "div"; "mod"; "call_2s"; "call_2n"; "set_colour"; "throw" |]
@@ -133,7 +147,7 @@ type Machine(filename) = class
 	let nul2op = fun (op:instruction) x y ret -> failwith <| sprintf "Unimplemented 2op instruction %s" names2op.[op.opcode]
 	let instructions2op = [|
 	(* none *) nul2op;
-	(* je *) nul2op;
+	(* je *) (fun i x y ret -> (x |> s.vin) = (y |> s.vin) |> jump i);
 	(* jl *) nul2op;
 	(* jg *) nul2op;
 	(* dec_chk *) nul2op;
@@ -147,7 +161,7 @@ type Machine(filename) = class
 	(* clear_attr *) nul2op;
 	(* store *) nul2op;
 	(* insert_obj *) nul2op;
-	(* loadw *) nul2op;
+	(* loadw *) (fun i x y ret -> (x |> s.vin) + 2us * (y |> s.vin) |> s.paddr |> s.read16 |> s.vout ret);
 	(* loadb *) nul2op;
 	(* get_prop *) nul2op;
 	(* get_prop_addr *) nul2op;
@@ -165,7 +179,7 @@ type Machine(filename) = class
 
 	let nul1op = fun (op:instruction) x ret -> failwith <| sprintf "Unimplemented 1op instruction %s" names1op.[op.opcode]
 	let instructions1op = [|
-	(* jz *) nul1op;
+	(* jz *) (fun i x ret -> (x |> s.vin) = 0us |> jump i);
 	(* get_sibling *) nul1op;
 	(* get_child *) nul1op;
 	(* get_parent *) nul1op;
@@ -176,8 +190,8 @@ type Machine(filename) = class
 	(* call_1s *) nul1op;
 	(* remove_obj *) nul1op;
 	(* print_obj *) nul1op;
-	(* ret *) nul1op;
-	(* jump *) nul1op;
+	(* ret *) (fun i x ret -> ip <- x |> s.vin |> s.ret);
+	(* jump *) (fun i x ret -> ip <- ip + i.length + (x |> s.vin |> int16 |> int) - 2);
 	(* print_paddr *) nul1op;
 	(* load *) nul1op;
 	(* not *) nul1op;
@@ -208,7 +222,7 @@ type Machine(filename) = class
 	let instructionsvar =[|
 	(* call*) (fun i ret -> ip <- s.call(i.args.[0] |> s.vin |> s.paddr) (ip + i.length) ret
 		(seq { for x in i.args.[1..] do yield x |> s.vin done } |> Seq.toArray));
-	(* storew*) nulvar;
+	(* storew*) (fun i ret -> (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin) |> s.paddr |> s.write16 (i.args.[2] |> s.vin));
 	(* storeb*) nulvar;
 	(* put_prop*) nulvar;
 	(* sread*) nulvar;
@@ -283,6 +297,9 @@ type Machine(filename) = class
 		| _ -> false
 
 	let branches opcode = function
+		| Op2 -> (opcode >= 1 && opcode <= 7) || (opcode = 10)
+		| Op1 -> (opcode >= 0 && opcode <= 3)
+		| Op0 -> opcode = 5 || opcode = 6 || opcode = 0xd || opcode = 0xf
 		| _ -> false
 
 	let prints opcode = function
@@ -293,7 +310,14 @@ type Machine(filename) = class
 		{ i with length=i.length+1; ret=Variable(ip + i.length |> s.read8) } else i
 
 	let add_branch i = if branches i.opcode i.optype then
-		i else i
+		let branch1 = ip + i.length |> s.read8 |> int in
+		let offset = (0x80 &&& branch1) <<< 8 in
+		let offset, len = if branch1 &&& 0x40 <> 0 then
+			offset ||| (branch1 &&& 0x3f), 1 else
+			offset ||| (branch1 &&& 0x1f <<< 8) ||| (ip + i.length + 1 |> s.read8 |> int), 2 in
+		let offset, compare = offset &&& 0x7fff, offset &&& 0x8000 <> 0 in
+		let offset = if offset > 0x0fff then -(0x1fff - offset + 1) else offset in
+		{ i with offset=offset; length=i.length + len; compare=compare } else i
 
 	let add_print i = if prints i.opcode i.optype then
 		let str = ip + i.length |> s.readString in
