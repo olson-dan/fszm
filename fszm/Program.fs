@@ -63,7 +63,7 @@ type Story(filename) = class
 	let globals = _read16 0xc |> int
 
 	let stack = Stack<uint16>()
-	let routine_stack = Stack<int * int * int * byte * int>()
+	let routine_stack = Stack<int * int * int * operand * int>()
 
 	let _addr x = dynamic_start + (x |> int)
 	let _paddr x = dynamic_start + (x * 2us |> int)
@@ -90,6 +90,7 @@ type Story(filename) = class
 	member this.readString = _readString
 	member this.readVariable = _readVariable
 	member this.writeVariable = _writeVariable
+	member this.paddr = _paddr
 
 	member this.vin = function
 		| Variable(x) -> _readVariable x
@@ -98,6 +99,22 @@ type Story(filename) = class
 		| Omitted -> failwith "omitted args have no value"
 
 	member this.vout var value = _writeVariable value (match var with Variable(x) -> x | _ -> failwith ("bad return"))
+
+	member this.call addr retaddr retdata (args:uint16 array) =
+		if addr - dynamic_start = 0 then (this.vout retdata 0us; retaddr) else
+		let args_start = stack.Count in
+		let numlocals = _read8 addr |> int in
+		routine_stack.Push(addr, args_start, numlocals, retdata, retaddr);
+		for i in 0 .. numlocals do
+			stack.Push(if i < args.Length then args.[i] else _read16 (addr + 1 + i * 2))
+		done;
+		addr + 1 + numlocals * 2
+
+	member this.ret retval =
+		let addr, args_start, numlocals, retdata, retaddr = routine_stack.Pop() in
+		while stack.Count <> args_start do stack.Pop() |> ignore done;
+		this.vout retdata retval;
+		retaddr
 end
 
 type Machine(filename) = class
@@ -187,9 +204,10 @@ type Machine(filename) = class
 	(* piracy *) nul0op;
 	|]
 
-	let nulvar = fun (op:instruction) args ret -> failwith <| sprintf "Unimplemented var instruction %s" namesvar.[op.opcode]
+	let nulvar = fun (op:instruction) ret -> failwith <| sprintf "Unimplemented var instruction %s" namesvar.[op.opcode]
 	let instructionsvar =[|
-	(* call*) nulvar;
+	(* call*) (fun i ret -> ip <- s.call(i.args.[0] |> s.vin |> s.paddr) (ip + i.length) ret
+		(seq { for x in i.args.[1..] do yield x |> s.vin done } |> Seq.toArray));
 	(* storew*) nulvar;
 	(* storeb*) nulvar;
 	(* put_prop*) nulvar;
@@ -234,7 +252,7 @@ type Machine(filename) = class
 	let decode_long op =
 		let x = ip + 1 |> s.read8 in
 		let y = ip + 2 |> s.read8 in
-		{ emptyInstruction with	opcode=(op&&&0x1fuy)|>int; optype=Op2; length=3;	args=
+		{ emptyInstruction with	opcode=(op&&&0x1fuy)|>int; optype=Op2; length=3; args=
 		[|
 			(if op &&& 0x40uy <> 0uy then Variable(x) else Small(x));
 			(if op &&& 0x20uy <> 0uy then Variable(y) else Small(y))
@@ -281,7 +299,7 @@ type Machine(filename) = class
 		let str = ip + i.length |> s.readString in
 		{ i with length=i.length+str.length; string=str.s } else i
 
-	let decode =
+	let decode ip =
 		let op = s.read8 ip in
 		(match (op &&& 0xc0uy) >>> 6 with
 		| 0x03uy -> decode_var op
@@ -292,21 +310,21 @@ type Machine(filename) = class
 		|> add_print
 
 	let string_from_operand = function
-	| Large(x) -> sprintf "#%04x" x
-	| Small(x) -> sprintf "#%02x" x
-	| Variable(x) when x = 0uy -> "(SP)+"
-	| Variable(x) when x >= 0x10uy -> sprintf "G%02x" (x - 0x10uy)
-	| Variable(x) -> sprintf "L%02x" (x - 1uy)
-	| Omitted -> ""
+		| Large(x) -> sprintf "#%04x" x
+		| Small(x) -> sprintf "#%02x" x
+		| Variable(x) when x = 0uy -> "(SP)+"
+		| Variable(x) when x >= 0x10uy -> sprintf "G%02x" (x - 0x10uy)
+		| Variable(x) -> sprintf "L%02x" (x - 1uy)
+		| Omitted -> ""
 
 	let rec print str ret = function
-	| h :: g :: t -> print (str + (string_from_operand h) + ",") ret (g :: t)
-	| h :: t -> print (str + (string_from_operand h)) ret t
-	| [] -> str + (match ret with
-		| Variable(x) when x = 0uy -> " -> -(SP)"
-		| Variable(x) when x >= 0x10uy -> sprintf " -> G%02x" (x - 0x10uy)
-		| Variable(x) -> sprintf " -> L%02x" (x - 1uy)
-		| _ -> "")
+		| h :: g :: t -> print (str + (string_from_operand h) + ",") ret (g :: t)
+		| h :: t -> print (str + (string_from_operand h)) ret t
+		| [] -> str + (match ret with
+			| Variable(x) when x = 0uy -> " -> -(SP)"
+			| Variable(x) when x >= 0x10uy -> sprintf " -> G%02x" (x - 0x10uy)
+			| Variable(x) -> sprintf " -> L%02x" (x - 1uy)
+			| _ -> "")
 
 	let disassemble i =	let names = match i.optype with
 		| Op0 -> names0op
@@ -316,85 +334,19 @@ type Machine(filename) = class
 		printfn "%s" (print (names.[i.opcode].ToUpper() + "\t") i.ret (i.args |> Array.toList)); i
 
 	let execute i =
-		let oldip = ref ip in
-		match i.optype with
+		let oldip = ip in
+		(match i.optype with
 		| Op0 -> instructions0op.[i.opcode] i i.ret
 		| Op1 -> instructions1op.[i.opcode] i i.args.[0] i.ret
 		| Op2 -> instructions2op.[i.opcode] i i.args.[0] i.args.[1] i.ret
-		| Var -> instructionsvar.[i.opcode] i i.args i.ret;
-		ip <- if ip = !oldip then ip + i.length else ip
+		| Var -> instructionsvar.[i.opcode] i i.ret);
+		if ip = oldip then ip + i.length else ip
 
 	member this.Run = while finished <> true do
-		decode
+		ip <- decode ip
 		|> disassemble
 		|> execute
 		done
-end
-
-type ZStory(filename) = class
-	let bytes = File.ReadAllBytes(filename)
-	let stack = Stack<uint16>()
-	let routine_stack = Stack<int * int * int * byte * int>()
-
-	let readWord offset = ((uint16 bytes.[offset]) <<< 8) ||| (uint16 bytes.[offset+1])
-	let readByte offset = bytes.[offset]
-	let writeWord offset word =
-		bytes.SetValue(uint8 (word >>> 8), int offset);
-		bytes.SetValue(uint8 (word &&& 0xffus), (int offset)+1)
-	let writeByte offset byte =
-		bytes.SetValue(uint8 (byte &&& 0xff), int offset)
-
-	let version = readByte 0
-	let dynamic_start = 0
-	let dynamic_end = readWord 0xe |> int
-	let static_start = dynamic_end
-	let static_end = static_start + (min bytes.Length 0xffff)
-	let high_start = readWord 0x4 |> int
-	let high_end = bytes.Length
-	let globals = readWord 0xc |> int
-	let mutable ip = dynamic_start + ((readWord 0x6) |> int)
-
-	member this.Bytes = bytes
-	member this.Version = version
-	member this.IP with get() = ip and set value = ip <- value
-	member this.ReadWord = readWord
-	member this.ReadByte = readByte
-	member this.WriteWord = writeWord
-	member this.WriteByte = writeByte
-	member this.Address addr = dynamic_start + (addr |> int)
-	member this.PackedAddress addr = dynamic_start + (addr * 2us |> int)
-	member this.ReadGlobal x = readWord (globals + (this.PackedAddress (x - 0x10uy |> uint16)))
-	member this.WriteGlobal x v = writeWord (globals + (this.PackedAddress (x - 0x10uy |> uint16))) v
-
-	member this.ReadLocal x = let addr, stack_start, numlocals, return_storage, return_addr = routine_stack.Peek() in
-		let s, i = stack.ToArray(), stack_start + (x |> int) - 1 in s.[i]
-	member this.WriteLocal x v = let addr, stack_start, numlocals, return_storage, return_addr = routine_stack.Peek() in
-		let s, i = stack.ToArray(), stack_start + (x |> int) - 1 in s.SetValue(v, x |> int)
-
-	member this.Call call_addr (args : uint16 list) ret_addr ret_data =
-		if call_addr = 0 then (this.WriteVariable 0us ret_data; ret_addr) else
-		let args_start = stack.Count in
-		let numlocals = readByte call_addr |> int in
-		routine_stack.Push(call_addr, args_start, numlocals, ret_data, ret_addr);
-		for i in 0 .. numlocals do
-			stack.Push(
-				if i < args.Length then args.[i] else readWord (call_addr + 1 + i * 2)
-			)
-		done;
-		call_addr + 1 + numlocals * 2
-
-	member this.ReadVariable = function
-	| x when x >= 0x10uy -> this.ReadGlobal x
-	| x when x = 0uy -> stack.Pop()
-	| x -> this.ReadLocal x
-
-	member this.WriteVariable v = function
-	| x when x >= 0x10uy -> this.WriteGlobal x v
-	| x when x = 0uy -> stack.Push(v)
-	| x -> this.WriteLocal x v
-
-	member this.Pop = stack.Pop()
-	member this.Push x = stack.Push(x)
 end
 
 do
