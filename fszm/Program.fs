@@ -8,6 +8,12 @@ type shift = ShiftZero | ShiftOne | ShiftTwo
 type zstring = { s:string; length:int; shift:shift }
 let emptyString = { s=""; length=0; shift=ShiftZero }
 
+type zobject = { num:int; attrib:byte array; parent:int; sibling:int; child:int; addr:int; name:zstring }
+let defaultObject = {num=0; attrib=[||]; parent=0; sibling=0; child=0; addr=0; name=emptyString }
+
+type zproperty = { num:int; len:int; addr:int }
+let defaultProperty = { num=0; len=0; addr=0 }
+
 type operand = Large of uint16 | Small of byte | Variable of byte | Omitted
 type encoding = Op0 | Op1 | Op2 | Var
 type instruction = { opcode:int; optype:encoding; length:int; args:operand array; ret:operand; string:string; offset:int; compare:bool }
@@ -20,17 +26,18 @@ type Story(filename) = class
 	let _read8 off = mem.[off]
 	let _read16 off = (mem.[off] |> uint16 <<< 8) ||| (mem.[off+1] |> uint16)
 	let _write16 v offset  =
+		printfn "%A" (v,offset);
 		mem.SetValue(uint8 (v >>> 8), int offset);
 		mem.SetValue(uint8 (v &&& 0xffus), (int offset)+1)
 	let _write8 v offset =
-		mem.SetValue(uint8 (v &&& 0xff), int offset)
+		mem.SetValue(uint8 (v &&& 0xffus), int offset)
 
 	// zstring decoding w/ abbrev support.
 	let unpackTriplet x = [(x >>> 10) &&& 0x1fus |> byte; (x >>> 5) &&& 0x1fus |> byte; (x >>> 0) &&& 0x1fus |> byte]
 
 	let rec readString_r off (str:zstring) l =
 		let x = off + str.length |> _read16 in
-		if x &&& 0x8000us <> 0us then (str, l @ (unpackTriplet x)) else
+		if x &&& 0x8000us <> 0us then ({ str with length=str.length+2}, l @ (unpackTriplet x)) else
 		l @ (unpackTriplet x) |> readString_r off { str with length=str.length+2 }
 
 	let rec pumpString str = function
@@ -89,6 +96,15 @@ type Story(filename) = class
 		| x when x = 0uy -> _push v
 		| x -> _writeLocal v x
 
+    let _readProp x = let size = _read8 x |> int in
+        if size = 0 then defaultProperty else
+        { defaultProperty with num=size&&&31; len=((size&&&0xe0)>>>5) + 1; addr=x }
+
+	let _writeProp x (p : zproperty) = match p.len with
+		| 1 -> p.addr |> _write8 x
+		| 2 -> p.addr |> _write16 x
+		| _ -> failwith "Undefined behavior, property length must be 1 or 2 in v3."
+
 	member this.read8 = _read8
 	member this.read16 = _read16
 	member this.write8 = _write8
@@ -96,6 +112,8 @@ type Story(filename) = class
 	member this.readString = _readString
 	member this.readVariable = _readVariable
 	member this.writeVariable = _writeVariable
+	member this.readProp = _readProp
+	member this.writeProp = _writeProp
 	member this.paddr = _paddr
 	member this.thestack = stack
 
@@ -122,6 +140,31 @@ type Story(filename) = class
 		while stack.Length <> args_start do _pop () |> ignore done;
 		this.vout retdata retval;
 		retaddr
+
+    member this.readObj index =
+        let addr = (_read16 0xa |> int) + 31 * 2 + (index - 1) * 9 in
+        let prop_addr = addr + 7 |> _read16 |> int in
+        { defaultObject with
+        num=index;
+        attrib=seq { for i in 0..3 -> addr + i |> _read8 } |> Seq.toArray;
+        parent = addr+4 |> _read8 |> int;
+        sibling = addr+5 |> _read8 |> int;
+        child = addr+6 |> _read8 |> int;
+        addr = prop_addr;
+        name = prop_addr + 1 |> _readString
+        }
+
+    member this.getProp index (obj : zobject) =
+        // Pass -1 to get the first property
+        let rec iterProperties addr =
+			printfn "%A" (addr,_read8 addr);
+            let p = _readProp addr in
+            match p.num, p.len with
+            | 0, 0 -> failwith "bad property list"
+            | i, _ when i = index -> p
+            | _, l -> addr + 1 + l |> iterProperties in
+        let addr = obj.addr + 1 + obj.name.length in
+        iterProperties addr
 end
 
 type Machine(filename) = class
@@ -224,7 +267,7 @@ type Machine(filename) = class
 		(seq { for x in i.args.[1..] do yield x |> s.vin done } |> Seq.toArray));
 	(* storew*) (fun i ret -> (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin) |> s.paddr |> s.write16 (i.args.[2] |> s.vin));
 	(* storeb*) nulvar;
-	(* put_prop*) nulvar;
+	(* put_prop*) (fun i ret -> i.args.[0] |> s.vin |> int |> s.readObj |> s.getProp (i.args.[1] |> s.vin |> int) |> s.writeProp (i.args.[2] |> s.vin));
 	(* sread*) nulvar;
 	(* print_char*) nulvar;
 	(* print_num*) nulvar;
@@ -350,7 +393,7 @@ type Machine(filename) = class
 			| Variable(x) -> sprintf " -> L%02x" (x - 1uy)
 			| _ -> "")
 
-	let disassemble i =	let names = match i.optype with
+	let disassemble i = let names = match i.optype with
 		| Op0 -> names0op
 		| Op1 -> names1op
 		| Op2 -> names2op
@@ -366,13 +409,14 @@ type Machine(filename) = class
 		| Var -> instructionsvar.[i.opcode] i i.ret);
 		if ip = oldip then ip + i.length else ip
 
-	member this.Run = while finished <> true do
-		ip <- decode ip
+	member this.Run () = while finished <> true do
+		ip <- ip
+		|> decode
 		|> disassemble
 		|> execute
 		done
 end
 
 do
-	Machine("zork.z3").Run;
+	Machine("zork.z3").Run ();
 	Console.ReadKey(true) |> ignore
