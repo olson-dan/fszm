@@ -48,7 +48,8 @@ type Story(filename) = class
 			let index = 32 * ((int a) - 1) + (int x) in
 			let offset = ((table + index * 2) |> _read16 |> int) * 2 in
 			let _, l = readString_r offset emptyString [] in
-			pumpString str (l @ tail)
+			let abbrev = pumpString emptyString l in
+			pumpString {str with s=str.s+abbrev.s} tail
 		| 4uy :: tail -> pumpString { str with shift=ShiftOne } tail
 		| 5uy :: tail -> pumpString { str with shift=ShiftTwo } tail
 		| 6uy :: hi :: lo :: tail when str.shift=ShiftTwo ->
