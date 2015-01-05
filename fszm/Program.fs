@@ -250,7 +250,7 @@ type Machine(filename) = class
 	(* clear_attr *) nul2op;
 	(* store *) (fun _ x y _ -> (x |> s.vin_direct) |> s.writeVariable (y |> s.vin));
 	(* insert_obj *) (fun _ x y _ -> (x |> s.vin |> int |> s.readObj, y |> s.vin |> int |> s.readObj) ||> s.insertObj);
-	(* loadw *) (fun _ x y ret -> (x |> s.vin) + 2us * (y |> s.vin) |> s.paddr |> s.read16 |> s.vout ret);
+	(* loadw *) (fun _ x y ret -> (x |> s.vin) + 2us * (y |> s.vin) |> s.addr |> s.read16 |> s.vout ret);
 	(* loadb *) (fun _ x y ret -> (x |> s.vin) + (y |> s.vin) |> s.addr |> s.read8 |> uint16 |> s.vout ret);
 	(* get_prop *) (fun _ x y ret -> x |> s.vin_addr |> s.readObj |> s.getProp (y |> s.vin |> int) |> s.readProp |> s.vout ret);
 	(* get_prop_addr *) nul2op;
