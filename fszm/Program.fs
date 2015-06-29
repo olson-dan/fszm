@@ -98,19 +98,19 @@ type Story(filename) = class
 		| x when x = 0uy -> _push v
 		| x -> _writeLocal v x
 
-    let _readObj index =
+	let _readObj index =
 		if index = 0 then failwith "Cannot read object 0" else
-        let addr = (_read16 0xa |> int) + 31 * 2 + (index - 1) * 9 in
-        let prop_addr = addr + 7 |> _read16 |> int in
-        { defaultObject with
-        num=index;
-        attrib=(addr+0 |> _read16 |> uint32) <<< 16 ||| (addr+2 |> _read16 |> uint32);
-        parent = addr+4 |> _read8 |> int;
-        sibling = addr+5 |> _read8 |> int;
-        child = addr+6 |> _read8 |> int;
-        addr = prop_addr;
-        name = prop_addr + 1 |> _readString
-        }
+			let addr = (_read16 0xa |> int) + 31 * 2 + (index - 1) * 9 in
+			let prop_addr = addr + 7 |> _read16 |> int in
+			{ defaultObject with
+			num=index;
+			attrib=(addr+0 |> _read16 |> uint32) <<< 16 ||| (addr+2 |> _read16 |> uint32);
+			parent = addr+4 |> _read8 |> int;
+			sibling = addr+5 |> _read8 |> int;
+			child = addr+6 |> _read8 |> int;
+			addr = prop_addr;
+			name = prop_addr + 1 |> _readString
+			}
 
 	let _writeObj (o : zobject) =
 		// don't bother re-writing string, it can't change.
@@ -122,9 +122,9 @@ type Story(filename) = class
 		addr + 6 |> _write8 (o.child |> uint16);
 		addr + 7 |> _write16 (o.addr |> uint16)
 		
-    let _getProp x = let size = _read8 x |> int in
-        if size = 0 then defaultProperty else
-        { defaultProperty with num=size&&&31; len=((size&&&0xe0)>>>5) + 1; addr=x }
+	let _getProp x = let size = _read8 x |> int in
+		if size = 0 then defaultProperty else
+		{ defaultProperty with num=size&&&31; len=((size&&&0xe0)>>>5) + 1; addr=x }
 
 	let _readProp (p : zproperty) = match p.len with
 		| 1 -> p.addr + 1 |> _read8 |> uint16
@@ -197,16 +197,16 @@ type Story(filename) = class
 		{ (obj |> this.removeObj) with sibling=dest.child; parent=dest.num } |> _writeObj;
 		{ dest with child=obj.num } |> _writeObj
 
-    member this.getProp (index : int) (obj : zobject) =
-        // Pass -1 to get the first property
-        let rec iterProperties addr =
-            let p = _getProp addr in
-            match p.num, p.len with
-            | 0, 0 -> (* default *) { ((0xa |> _read16 |> _addr) + (index - 1) - 1 |> _getProp) with num=index;len=2 }
-            | i, _ when i = index -> p
-            | _, l -> addr + 1 + l |> iterProperties in
-        let addr = obj.addr + 1 + obj.name.length in
-        iterProperties addr
+	member this.getProp (index : int) (obj : zobject) =
+		// Pass -1 to get the first property
+		let rec iterProperties addr =
+			let p = _getProp addr in
+			match p.num, p.len with
+			| 0, 0 -> (* default *) { ((0xa |> _read16 |> _addr) + (index - 1) - 1 |> _getProp) with num=index;len=2 }
+			| i, _ when i = index -> p
+			| _, l -> addr + 1 + l |> iterProperties in
+		let addr = obj.addr + 1 + obj.name.length in
+		iterProperties addr
 
 	member this.parseInput max_parse (input : string) =
 		()
