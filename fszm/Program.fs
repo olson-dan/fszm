@@ -143,7 +143,7 @@ type Story(filename) = class
 	member this.readString = _readString
 	member this.readVariable = _readVariable
 	member this.writeVariable = _writeVariable
-    member this.readObj = _readObj
+	member this.readObj = _readObj
 	member this.writeObj = _writeObj
 	member this.readProp = _readProp
 	member this.writeProp = _writeProp
@@ -207,6 +207,9 @@ type Story(filename) = class
             | _, l -> addr + 1 + l |> iterProperties in
         let addr = obj.addr + 1 + obj.name.length in
         iterProperties addr
+
+	member this.parseInput max_parse (input : string) =
+		()
 end
 
 type Machine(filename) = class
@@ -231,6 +234,7 @@ type Machine(filename) = class
 	let names2op = [| "none"; "je"; "jl"; "jg"; "dec_chk"; "inc_chk"; "jin"; "test"; "or"; "and"; "test_attr"; "set_attr"; "clear_attr"; "store"; "insert_obj"; "loadw"; "loadb"; "get_prop"; "get_prop_addr"; "get_next_prop"; "add"; "sub"; "mul"; "div"; "mod"; "call_2s"; "call_2n"; "set_colour"; "throw" |]
 	let namesvar = [| "call"; "storew"; "storeb"; "put_prop"; "sread"; "print_char"; "print_num"; "random"; "push"; "pull"; "split_window"; "set_window"; "call_vs2"; "erase_window"; "erase_line"; "set_cursor"; "get_cursor"; "set_text_style"; "buffer_mode"; "output_stream"; "input_stream"; "sound_effect"; "read_char"; "scan_table"; "not_v4"; "call_vn"; "call_vn2"; "tokenise"; "encode_text"; "copy_table"; "print_table"; "check_arg_count" |]
 
+	let attr_bit x = 1u <<< (31 - (x |> s.vin |>int))
 	let nul2op = fun (op:instruction) x y ret -> _flush (); failwith <| sprintf "Unimplemented 2op instruction %s" names2op.[op.opcode]
 	let instructions2op = [|
 	(* none *) nul2op;
@@ -245,8 +249,8 @@ type Machine(filename) = class
 	(* test *) nul2op;
 	(* or *) nul2op;
 	(* and *) (fun _ x y ret -> (x |> s.vin) &&& (y |> s.vin) |> s.vout ret);
-	(* test_attr *) (fun i x y ret -> let o = x |> s.vin_addr |> s.readObj in o.attrib &&& (1u <<< (31 - (y |> s.vin |> int))) <> 0u |> jump i);
-	(* set_attr *) (fun _ x y _ -> let o = x |> s.vin_addr |> s.readObj in { o with attrib=o.attrib ||| (1u <<< (31 - (y |> s.vin |> int))) } |> s.writeObj);
+	(* test_attr *) (fun i x y ret -> let o = x |> s.vin_addr |> s.readObj in (o.attrib &&& (attr_bit y)) <> 0u |> jump i);
+	(* set_attr *) (fun _ x y _ -> let o = x |> s.vin_addr |> s.readObj in { o with attrib=o.attrib ||| (attr_bit y) } |> s.writeObj);
 	(* clear_attr *) nul2op;
 	(* store *) (fun _ x y _ -> (x |> s.vin_direct) |> s.writeVariable (y |> s.vin));
 	(* insert_obj *) (fun _ x y _ -> (x |> s.vin |> int |> s.readObj, y |> s.vin |> int |> s.readObj) ||> s.insertObj);
@@ -307,6 +311,7 @@ type Machine(filename) = class
 	(* piracy *) nul0op;
 	|]
 
+	let trim_string len (str:string) = str.Substring(0, (str.Length, len) ||> min)
 	let nulvar = fun (op:instruction) ret -> _flush (); failwith <| sprintf "Unimplemented var instruction %s" namesvar.[op.opcode]
 	let instructionsvar =[|
 	(* call*) (fun i ret -> ip <- s.call(i.args.[0] |> s.vin |> s.paddr) (ip + i.length) ret
@@ -314,7 +319,7 @@ type Machine(filename) = class
 	(* storew*) (fun i ret -> (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin) |> s.paddr |> s.write16 (i.args.[2] |> s.vin));
 	(* storeb*) nulvar;
 	(* put_prop*) (fun i _ -> i.args.[0] |> s.vin_addr |> s.readObj |> s.getProp (i.args.[1] |> s.vin_addr) |> s.writeProp (i.args.[2] |> s.vin));
-	(* sread*) nulvar;
+	(* sread*) (fun i _ -> _flush (); let str = _in () in str.ToLower() |> trim_string (i.args.[0] |> s.vin |> int) |> s.parseInput (i.args.[1] |> s.vin));
 	(* print_char*) (fun i _ -> i.args.[0] |> s.vin |> char |> sprintf "%c" |> _out);
 	(* print_num*) (fun i _ -> i.args.[0] |> s.vin |> sprintf "%d" |> _out);
 	(* random*) nulvar;
@@ -464,5 +469,4 @@ type Machine(filename) = class
 end
 
 do
-	Machine("zork.z3").Run ();
-	Console.ReadKey(true) |> ignore
+	Machine("zork.z3").Run ()
