@@ -240,7 +240,7 @@ type Machine(filename) = class
 	(* none *) nul2op;
 	(* je *) (fun i x y ret -> (x |> s.vin) = (y |> s.vin) |> jump i);
 	(* jl *) (fun i x y _ -> (x |> s.vin_i16) < (y |> s.vin_i16) |> jump i);
-	(* jg *) nul2op;
+	(* jg *) (fun i x y _ -> (x |> s.vin_i16) > (y |> s.vin_i16) |> jump i);
 	(* dec_chk *) (fun i x y ret -> let var = x |> s.vin_direct in let old = var |> s.readVariable |> int16 in
 		var |> s.writeVariable (old - 1s |> uint16); old - 1s < (y |> s.vin_i16) |> jump i);
 	(* inc_chk *) (fun i x y ret -> let var = x |> s.vin_direct in let old = var |> s.readVariable |> int16 in
