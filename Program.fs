@@ -208,8 +208,10 @@ type Story(filename) = class
                 { child with sibling = obj.sibling } |> _writeObj
         { obj with parent=0; sibling = 0 } |>> _writeObj
 
-    member this.insertObj (obj : zobject) (dest : zobject) =
-        { (obj |> this.removeObj) with sibling=dest.child; parent=dest.num } |> _writeObj;
+    member this.insertObj (obj : zobject) (dest : int) =
+        let obj = obj |> this.removeObj
+        let dest = dest |> _readObj
+        { (obj |> this.removeObj) with sibling=dest.child; parent=dest.num } |> _writeObj
         { dest with child=obj.num } |> _writeObj
 
     member this.getProp (index : int) (obj : zobject) =
@@ -282,7 +284,7 @@ type Machine(filename) = class
         { o with attrib=o.attrib ||| (attr_bit y) } |> s.writeObj);
     (* clear_attr *) nul2op;
     (* store *) (fun _ x y _ -> (x |> s.vin_direct) |> s.writeVariable (y |> s.vin));
-    (* insert_obj *) (fun _ x y _ -> (x |> s.vin |> int |> s.readObj, y |> s.vin |> int |> s.readObj) ||> s.insertObj);
+    (* insert_obj *) (fun _ x y _ -> (x |> s.vin |> int |> s.readObj, y |> s.vin |> int) ||> s.insertObj);
     (* loadw *) (fun _ x y ret -> (x |> s.vin) + 2us * (y |> s.vin) |> s.addr |> s.read16 |> s.vout ret);
     (* loadb *) (fun _ x y ret -> (x |> s.vin) + (y |> s.vin) |> s.addr |> s.read8 |> uint16 |> s.vout ret);
     (* get_prop *) (fun _ x y ret -> x |> s.vin_addr |> s.readObj |> s.getProp (y |> s.vin |> int) |> s.readProp |> s.vout ret);
