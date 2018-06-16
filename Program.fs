@@ -259,7 +259,11 @@ type Machine(filename) = class
     let nul2op = fun (op:instruction) x y ret -> _flush (); failwith <| sprintf "Unimplemented 2op instruction %s" names2op.[op.opcode]
     let instructions2op = [|
     (* none *) nul2op;
-    (* je *) (fun i x y ret -> (x |> s.vin) = (y |> s.vin) |> jump i);
+    (* je *) (fun i x _y _ret ->
+        let x = x |> s.vin
+        seq { for y in i.args.[1..] -> x = (y |> s.vin) }
+        |> Seq.contains true
+        |> jump i);
     (* jl *) (fun i x y _ -> (x |> s.vin_i16) < (y |> s.vin_i16) |> jump i);
     (* jg *) (fun i x y _ -> (x |> s.vin_i16) > (y |> s.vin_i16) |> jump i);
     (* dec_chk *) (fun i x y ret ->
