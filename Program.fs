@@ -3,8 +3,8 @@ open System.IO
 open System.Collections.Generic
 
 type shift = ShiftZero | ShiftOne | ShiftTwo
-type zstring = { s:string; length:int; shift:shift }
-let emptyString = { s=""; length=0; shift=ShiftZero }
+type zstring = { s:string; length:int; offset:int}
+let emptyString = { s=""; length=0; offset=0 }
 
 type zobject = { num:int; attrib:uint32; parent:int; sibling:int; child:int; addr:int; name:zstring }
 let defaultObject = {num=0; attrib=0u; parent=0; sibling=0; child=0; addr=0; name=emptyString }
@@ -34,39 +34,39 @@ type Story(filename) = class
     // zstring decoding w/ abbrev support.
     let unpackTriplet x = [(x >>> 10) &&& 0x1fus |> byte; (x >>> 5) &&& 0x1fus |> byte; (x >>> 0) &&& 0x1fus |> byte]
 
-    let rec readString_r off (str:zstring) l =
-        let x = off + str.length |> _read16
+    let rec readString_r (str:zstring) l =
+        let x = str.offset + str.length |> _read16
         if x &&& 0x8000us <> 0us then ({ str with length=str.length+2}, l @ (unpackTriplet x)) else
-        l @ (unpackTriplet x) |> readString_r off { str with length=str.length+2 }
+        l @ (unpackTriplet x) |> readString_r { str with length=str.length+2 }
 
-    let rec pumpString str = function
-    | 0uy :: tail -> pumpString { str with s=str.s+" " } tail
+    let rec pumpString str shift = function
+    | 0uy :: tail -> pumpString { str with s=str.s+" " } shift tail
     | a :: x :: tail when a > 0uy && a < 4uy ->
         let table = _read16 0x18 |> int
         let index = 32 * ((int a) - 1) + (int x)
         let offset = ((table + index * 2) |> _read16 |> int) * 2
-        let _, l = readString_r offset emptyString []
-        let abbrev = pumpString emptyString l
-        pumpString {str with s=str.s+abbrev.s} tail
-    | 4uy :: tail -> pumpString { str with shift=ShiftOne } tail
-    | 5uy :: tail -> pumpString { str with shift=ShiftTwo } tail
-    | 6uy :: hi :: lo :: tail when str.shift=ShiftTwo ->
+        let _, l = readString_r { emptyString with offset=offset } []
+        let abbrev = pumpString { emptyString with offset=offset } ShiftZero l
+        pumpString {str with s=str.s+abbrev.s} shift tail
+    | 4uy :: tail -> pumpString str ShiftOne tail
+    | 5uy :: tail -> pumpString str ShiftTwo tail
+    | 6uy :: hi :: lo :: tail when shift=ShiftTwo ->
         let c = hi <<< 5 ||| lo |> int
-        pumpString { str with s=str.s+Char.ConvertFromUtf32(c).ToString() } tail
+        pumpString { str with s=str.s+Char.ConvertFromUtf32(c).ToString() } ShiftZero tail
     | a :: tail when a > 5uy && a < 32uy ->
         let alphabet =
-            match str.shift with
+            match shift with
             | ShiftZero -> "______abcdefghijklmnopqrstuvwxyz"
             | ShiftOne -> "______ABCDEFGHIJKLMNOPQRSTUVWXYZ"
             | ShiftTwo -> "______^\n0123456789.,!?_#\'\"/\\-:()"
         let c = alphabet |> Seq.item (int a)
-        pumpString { str with s=str.s+c.ToString(); shift=ShiftZero } tail
+        pumpString { str with s=str.s+c.ToString() } ShiftZero tail
     | [] -> str
     | _ -> failwith "Bad zstring"
 
     let _readString off =
-        let str, l = readString_r off emptyString []
-        pumpString str l
+        let str, l = readString_r { emptyString with offset=off } []
+        pumpString str ShiftZero l
 
     let dynamic_start = 0
     let dynamic_end = _read16 0xe |> int
@@ -137,38 +137,40 @@ type Story(filename) = class
         if size = 0 then defaultProperty else
         { defaultProperty with num=size&&&31; len=((size&&&0xe0)>>>5) + 1; addr=x }
 
-    let _readProp (p : zproperty) = match p.len with
+    let _readProp (p : zproperty) =
+        match p.len with
         | 1 -> p.addr + 1 |> _read8 |> uint16
         | 2 -> p.addr + 1 |> _read16
         | _ -> failwith "Undefined behavior, property length must be 1 or 2 in v3."
 
-    let _writeProp x (p : zproperty) = match p.len with
+    let _writeProp x (p : zproperty) =
+        match p.len with
         | 1 -> p.addr + 1 |> _write8 x
         | 2 -> p.addr + 1 |> _write16 x
         | _ -> failwith "Undefined behavior, property length must be 1 or 2 in v3."
 
-    member this.read8 = _read8
-    member this.read16 = _read16
-    member this.write8 = _write8
-    member this.write16 = _write16
-    member this.readString = _readString
-    member this.readVariable = _readVariable
-    member this.writeVariable = _writeVariable
-    member this.readObj = _readObj
-    member this.writeObj = _writeObj
-    member this.readProp = _readProp
-    member this.writeProp = _writeProp
-    member this.addr = _addr
-    member this.paddr = _paddr
+    member _this.read8 = _read8
+    member _this.read16 = _read16
+    member _this.write8 = _write8
+    member _this.write16 = _write16
+    member _this.readString = _readString
+    member _this.readVariable = _readVariable
+    member _this.writeVariable = _writeVariable
+    member _this.readObj = _readObj
+    member _this.writeObj = _writeObj
+    member _this.readProp = _readProp
+    member _this.writeProp = _writeProp
+    member _this.addr = _addr
+    member _this.paddr = _paddr
 
-    member this.vin = function
+    member _this.vin = function
         | Variable(x) -> _readVariable x
         | Large(x) -> x
         | Small(x) -> x |> uint16
         | Omitted -> failwith "Omitted args have no value"
 
     // some instructions pass in the variable number directly, these shouldn't go through readVariable
-    member this.vin_direct = function
+    member _this.vin_direct = function
         | Large(x) -> x |> byte
         | Small(x) -> x
         | _ -> failwith "Bad direct argument"
@@ -177,7 +179,7 @@ type Story(filename) = class
     member this.vin_paddr = this.vin >> _paddr
     member this.vin_i16 = this.vin >> int16
 
-    member this.vout var value = _writeVariable value (match var with Variable(x) -> x | _ -> failwith ("bad return"))
+    member _this.vout var value = _writeVariable value (match var with Variable(x) -> x | _ -> failwith ("bad return"))
 
     member this.call addr retaddr retdata (args:uint16 array) =
         if addr - dynamic_start = 0 then (this.vout retdata 0us; retaddr) else
@@ -195,7 +197,7 @@ type Story(filename) = class
         this.vout retdata retval;
         retaddr
 
-    member this.removeObj (obj : zobject) =
+    member _this.removeObj (obj : zobject) =
         if obj.parent <> 0 then
             let parent = obj.parent |> _readObj
             if parent.child = obj.num then
@@ -214,7 +216,7 @@ type Story(filename) = class
         { (obj |> this.removeObj) with sibling=dest.child; parent=dest.num } |> _writeObj
         { dest with child=obj.num } |> _writeObj
 
-    member this.getProp (index : int) (obj : zobject) =
+    member _this.getProp (index : int) (obj : zobject) =
         // Pass -1 to get the first property
         let rec iterProperties addr =
             let p = _getProp addr
@@ -326,13 +328,15 @@ type Machine(filename) = class
         o.name.s |> _out);
     (* ret *) (fun i x ret -> ip <- x |> s.vin |> s.ret);
     (* jump *) (fun i x ret -> ip <- ip + i.length + (x |> s.vin_i16 |> int) - 2);
-    (* print_paddr *) nul1op;
+    (* print_paddr *) (fun i x ret ->
+        let o = x |> s.vin_paddr |> s.readString
+        o.s |> _out);
     (* load *) nul1op;
     (* not *) nul1op;
     (* call_1n *) nul1op;
     |]
 
-    let nul0op = fun (op:instruction) ret -> _flush (); failwith <| sprintf "Unimplmented 0op instruction %s" names0op.[op.opcode]
+    let nul0op = fun (op:instruction) _ret -> _flush (); failwith <| sprintf "Unimplmented 0op instruction %s" names0op.[op.opcode]
     let instructions0op = [|
     (* rtrue *) (fun _ _ -> ip <- s.ret 1us);
     (* rfalse *) (fun _ _ -> ip <- s.ret 0us);
@@ -342,7 +346,7 @@ type Machine(filename) = class
     (* save *) nul0op;
     (* restore *) nul0op;
     (* restart *) nul0op;
-    (* ret_popped *) (fun i _ -> ip <- s.readVariable 0uy |> s.ret);
+    (* ret_popped *) (fun _ _ -> ip <- s.readVariable 0uy |> s.ret);
     (* pop *) nul0op;
     (* quit *) nul0op;
     (* new_line *) (fun _ _ -> "\n" |> _out);
@@ -393,11 +397,12 @@ type Machine(filename) = class
     |]
 
     let decode_short op =
-        let optype, length, args = match op &&& 0x30uy >>> 4 with
-        | 3uy -> Op0, 1, [||]
-        | 2uy -> Op1, 2, [| Variable(ip + 1 |> s.read8) |]
-        | 1uy -> Op1, 2, [| Small(ip + 1 |> s.read8) |]
-        | _ -> Op1, 3, [| Large(ip + 1 |> s.read16) |]
+        let optype, length, args =
+            match op &&& 0x30uy >>> 4 with
+            | 3uy -> Op0, 1, [||]
+            | 2uy -> Op1, 2, [| Variable(ip + 1 |> s.read8) |]
+            | 1uy -> Op1, 2, [| Small(ip + 1 |> s.read8) |]
+            | _ -> Op1, 3, [| Large(ip + 1 |> s.read16) |]
         { emptyInstruction with opcode=(op&&&0x0fuy)|>int; optype=optype; length=length; args=args }
 
     let decode_long op =
@@ -510,16 +515,18 @@ type Machine(filename) = class
         | Op0 -> instructions0op.[i.opcode] i i.ret
         | Op1 -> instructions1op.[i.opcode] i i.args.[0] i.ret
         | Op2 -> instructions2op.[i.opcode] i i.args.[0] i.args.[1] i.ret
-        | Var -> instructionsvar.[i.opcode] i i.ret);
+        | Var -> instructionsvar.[i.opcode] i i.ret)
         if ip = oldip then ip + i.length else ip
 
-    member this.Run () =
+    member _this.Run () =
         while finished <> true do
             ip <- ip
             |> decode
+#if DEBUG
             |> disassemble
+#endif
             |> execute
 end
 
 do
-    Machine("zork.z3").Run ()
+    Machine("czech.z3").Run ()
