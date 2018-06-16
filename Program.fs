@@ -103,9 +103,21 @@ type Story(filename) = class
         | x when x = 0uy -> _pop ()
         | x -> _readLocal x
 
+    let _readVariableIndirect = function
+        | x when x >= 0x10uy -> _readGlobal x
+        | x when x = 0uy -> stack.[stack.Length-1]
+        | x -> _readLocal x
+
     let _writeVariable v = function
         | x when x >= 0x10uy -> _writeGlobal v x
         | x when x = 0uy -> _push v
+        | x -> _writeLocal v x
+
+    let _writeVariableIndirect v = function
+        | x when x >= 0x10uy -> _writeGlobal v x
+        | x when x = 0uy ->
+            _pop () |> ignore
+            _push v
         | x -> _writeLocal v x
 
     let _readObj index =
@@ -134,8 +146,7 @@ type Story(filename) = class
 
     let _getProp x =
         let size = _read8 x |> int
-        if size = 0 then defaultProperty else
-        { defaultProperty with num=size&&&31; len=((size&&&0xe0)>>>5) + 1; addr=x }
+        { num=size&&&31; len=((size&&&0xe0)>>>5) + 1; addr=x }
 
     let _readProp (p : zproperty) =
         match p.len with
@@ -155,10 +166,13 @@ type Story(filename) = class
     member _this.write16 = _write16
     member _this.readString = _readString
     member _this.readVariable = _readVariable
+    member _this.readVariableIndirect = _readVariableIndirect
     member _this.writeVariable = _writeVariable
+    member _this.writeVariableIndirect = _writeVariableIndirect
     member _this.readObj = _readObj
     member _this.writeObj = _writeObj
     member _this.readProp = _readProp
+    member _this.readPropAtAddr = _getProp
     member _this.writeProp = _writeProp
     member _this.addr = _addr
     member _this.paddr = _paddr
@@ -171,6 +185,7 @@ type Story(filename) = class
 
     // some instructions pass in the variable number directly, these shouldn't go through readVariable
     member _this.vin_direct = function
+        //| Variable(x) -> _readVariable x |> byte
         | Large(x) -> x |> byte
         | Small(x) -> x
         | _ -> failwith "Bad direct argument"
@@ -179,7 +194,11 @@ type Story(filename) = class
     member this.vin_paddr = this.vin >> _paddr
     member this.vin_i16 = this.vin >> int16
 
-    member _this.vout var value = _writeVariable value (match var with Variable(x) -> x | _ -> failwith ("bad return"))
+    member _this.vout var value =
+        _writeVariable value (match var with Variable(x) -> x | _ -> failwith ("bad return"))
+
+    member _this.vout_indirect var value =
+        _writeVariableIndirect value (match var with Variable(x) -> x | _ -> failwith("bad return"))
 
     member this.call addr retaddr retdata (args:uint16 array) =
         if addr - dynamic_start = 0 then (this.vout retdata 0us; retaddr) else
@@ -195,6 +214,12 @@ type Story(filename) = class
         let _addr, args_start, _numlocals, retdata, retaddr = routine_stack.Pop()
         while stack.Length <> args_start do _pop () |> ignore done;
         this.vout retdata retval;
+        retaddr
+
+    member this.ret_indirect retval =
+        let _addr, args_start, _numlocals, retdata, retaddr = routine_stack.Pop()
+        while stack.Length <> args_start do _pop () |> ignore done;
+        this.vout_indirect retdata retval;
         retaddr
 
     member _this.removeObj (obj : zobject) =
@@ -220,12 +245,23 @@ type Story(filename) = class
         // Pass -1 to get the first property
         let rec iterProperties addr =
             let p = _getProp addr
-            match p.num, p.len with
-            | 0, 0 -> (* default *) { ((0xa |> _read16 |> _addr) + (index - 1) - 1 |> _getProp) with num=index;len=2 }
-            | i, _ when i = index -> p
-            | _, l -> addr + 1 + l |> iterProperties
+            match p.num with
+            | 0 -> (0xa |> _read16 |> _addr) + (index - 1) * 2 |> _getProp
+            | i when i = index -> p
+            | _ -> addr + 1 + p.len |> iterProperties
         let addr = obj.addr + 1 + obj.name.length
         iterProperties addr
+
+    member _this.getNextProp (index : int) (obj : zobject) =
+        // TODO: gracefully handle the missing property case (with an error message)
+        let rec iterProperties found addr =
+            let p = _getProp addr
+            match p.num, found with
+            | 0, false -> 0
+            | i, true -> i
+            | i, false -> addr + 1 + p.len |> iterProperties (i = index)
+        let addr = obj.addr + 1 + obj.name.length
+        iterProperties (index = 0) addr |> uint16
 
     member this.parseInput max_parse (input : string) =
         ()
@@ -258,86 +294,119 @@ type Machine(filename) = class
     let attr_bit x = 1u <<< (31 - (x |> s.vin |>int))
     let nul2op = fun (op:instruction) x y ret -> _flush (); failwith <| sprintf "Unimplemented 2op instruction %s" names2op.[op.opcode]
     let instructions2op = [|
-    (* none *) nul2op;
-    (* je *) (fun i x _y _ret ->
-        let x = x |> s.vin
-        seq { for y in i.args.[1..] -> x = (y |> s.vin) }
-        |> Seq.contains true
-        |> jump i);
-    (* jl *) (fun i x y _ -> (x |> s.vin_i16) < (y |> s.vin_i16) |> jump i);
-    (* jg *) (fun i x y _ -> (x |> s.vin_i16) > (y |> s.vin_i16) |> jump i);
-    (* dec_chk *) (fun i x y ret ->
-        let var = x |> s.vin_direct
-        let old = var |> s.readVariable |> int16
-        var |> s.writeVariable (old - 1s |> uint16)
-        old - 1s < (y |> s.vin_i16) |> jump i);
-    (* inc_chk *) (fun i x y ret ->
-        let var = x |> s.vin_direct
-        let old = var |> s.readVariable |> int16
-        var |> s.writeVariable (old + 1s |> uint16)
-        old + 1s > (y |> s.vin_i16) |> jump i);
-    (* jin *) (fun i x y _ ->
-        let o = x |> s.vin_addr |> s.readObj
-        o.parent = (y |> s.vin |> int) |> jump i);
-    (* test *) nul2op;
-    (* or *) nul2op;
-    (* and *) (fun _ x y ret -> (x |> s.vin) &&& (y |> s.vin) |> s.vout ret);
-    (* test_attr *) (fun i x y ret ->
-        let o = x |> s.vin_addr |> s.readObj
-        (o.attrib &&& (attr_bit y)) <> 0u |> jump i);
-    (* set_attr *) (fun _ x y _ ->
-        let o = x |> s.vin_addr |> s.readObj
-        { o with attrib=o.attrib ||| (attr_bit y) } |> s.writeObj);
-    (* clear_attr *) nul2op;
-    (* store *) (fun _ x y _ -> (x |> s.vin_direct) |> s.writeVariable (y |> s.vin));
-    (* insert_obj *) (fun _ x y _ -> (x |> s.vin |> int |> s.readObj, y |> s.vin |> int) ||> s.insertObj);
-    (* loadw *) (fun _ x y ret -> (x |> s.vin) + 2us * (y |> s.vin) |> s.addr |> s.read16 |> s.vout ret);
-    (* loadb *) (fun _ x y ret -> (x |> s.vin) + (y |> s.vin) |> s.addr |> s.read8 |> uint16 |> s.vout ret);
-    (* get_prop *) (fun _ x y ret -> x |> s.vin_addr |> s.readObj |> s.getProp (y |> s.vin |> int) |> s.readProp |> s.vout ret);
-    (* get_prop_addr *) nul2op;
-    (* get_next_prop *) nul2op;
-    (* add *) (fun _ x y ret -> (x |> s.vin_i16) + (y |> s.vin_i16) |> uint16 |> s.vout ret);
-    (* sub *) (fun _ x y ret -> (x |> s.vin_i16) - (y |> s.vin_i16) |> uint16 |> s.vout ret);
-    (* mul *) (fun _ x y ret -> (x |> s.vin_i16) * (y |> s.vin_i16) |> uint16 |> s.vout ret);
-    (* div *) (fun _ x y ret -> (x |> s.vin_i16) / (y |> s.vin_i16) |> uint16 |> s.vout ret);
-    (* mod *) nul2op;
-    (* call_2s *) nul2op;
-    (* call_2n *) nul2op;
-    (* set_colour *) nul2op;
-    (* throw *) nul2op;
+        nul2op; (* none *)
+        (fun i x _y _ret -> (* je *)
+            let x = x |> s.vin
+            seq { for y in i.args.[1..] -> x = (y |> s.vin) }
+            |> Seq.contains true
+            |> jump i);
+        (fun i x y _ -> (* jl *)
+            (x |> s.vin_i16) < (y |> s.vin_i16) |> jump i);
+        (fun i x y _ -> (* jg *)
+            (x |> s.vin_i16) > (y |> s.vin_i16) |> jump i);
+        (fun i x y _ -> (* dec_chk *)
+            let var = x |> s.vin_direct
+            let old = var |> s.readVariable |> int16
+            var |> s.writeVariable (old - 1s |> uint16)
+            old - 1s < (y |> s.vin_i16) |> jump i);
+        (fun i x y _ -> (* inc_chk *)
+            let var = x |> s.vin_direct
+            let old = var |> s.readVariable |> int16
+            var |> s.writeVariable (old + 1s |> uint16)
+            old + 1s > (y |> s.vin_i16) |> jump i);
+        (fun i x y _ -> (* jin *)
+            let o = x |> s.vin_addr |> s.readObj
+            o.parent = (y |> s.vin |> int) |> jump i);
+        nul2op; (* test *)
+        (fun _ x y ret -> (* or *)
+            (x |> s.vin) ||| (y |> s.vin) |> s.vout ret);
+        (fun _ x y ret -> (* and *)
+            (x |> s.vin) &&& (y |> s.vin) |> s.vout ret);
+        (fun i x y _ -> (* test_attr *)
+            let o = x |> s.vin_addr |> s.readObj
+            (o.attrib &&& (attr_bit y)) <> 0u |> jump i);
+        (fun _ x y _ -> (* set_attr *)
+            let o = x |> s.vin_addr |> s.readObj
+            { o with attrib=o.attrib ||| (attr_bit y) } |> s.writeObj);
+        (fun _ x y _ -> (* clear_attr *)
+            let o = x |> s.vin_addr |> s.readObj
+            { o with attrib=o.attrib &&& ~~~(attr_bit y) } |> s.writeObj);
+        (fun _ x y _ -> (* store *)
+            (x |> s.vin_direct) |> s.writeVariableIndirect (y |> s.vin));
+        (fun _ x y _ -> (* insert_obj *)
+            (x |> s.vin |> int |> s.readObj, y |> s.vin |> int) ||> s.insertObj);
+        (fun _ x y ret -> (* loadw *)
+            (x |> s.vin) + 2us * (y |> s.vin) |> s.addr |> s.read16 |> s.vout ret);
+        (fun _ x y ret -> (* loadb *)
+            (x |> s.vin) + (y |> s.vin) |> s.addr |> s.read8 |> uint16 |> s.vout ret);
+        (fun _ x y ret -> (* get_prop *)
+            x |> s.vin_addr |> s.readObj |> s.getProp (y |> s.vin |> int) |> s.readProp |> s.vout ret);
+        (fun _ x y ret ->  (* get_prop_addr *)
+            let prop = x |> s.vin_addr |> s.readObj |> s.getProp (y |> s.vin |> int)
+            prop.addr |> uint16 |> s.vout ret);
+        (fun _ x y ret -> (* get_next_prop *)
+            x |> s.vin_addr |> s.readObj |> s.getNextProp (y |> s.vin |> int) |> s.vout ret);
+        (fun _ x y ret -> (* add *)
+            (x |> s.vin_i16) + (y |> s.vin_i16) |> uint16 |> s.vout ret);
+        (fun _ x y ret -> (* sub *)
+            (x |> s.vin_i16) - (y |> s.vin_i16) |> uint16 |> s.vout ret);
+        (fun _ x y ret -> (* mul *)
+            (x |> s.vin_i16) * (y |> s.vin_i16) |> uint16 |> s.vout ret);
+        (fun _ x y ret -> (* div *)
+            (x |> s.vin_i16) / (y |> s.vin_i16) |> uint16 |> s.vout ret);
+        (fun _ x y ret -> (* mod *)
+            (x |> s.vin_i16) % (y |> s.vin_i16) |> uint16 |> s.vout ret);
+        nul2op; (* call_2s *)
+        nul2op; (* call_2n *)
+        nul2op; (* set_colour *)
+        nul2op; (* throw *)
     |]
 
     let nul1op = fun (op:instruction) x ret -> _flush (); failwith <| sprintf "Unimplemented 1op instruction %s" names1op.[op.opcode]
     let instructions1op = [|
-    (* jz *) (fun i x ret -> (x |> s.vin) = 0us |> jump i);
-    (* get_sibling *) (fun i x ret ->
-        let o = x |> s.vin_addr |> s.readObj
-        (o.sibling |> uint16 |>> s.vout ret) <> 0us |> jump i);
-    (* get_child *) (fun i x ret ->
-        let o = x |> s.vin_addr |> s.readObj
-        (o.child |> uint16 |>> s.vout ret) <> 0us |> jump i);
-    (* get_parent *) (fun _ x ret ->
-        let o = x |> s.vin_addr |> s.readObj
-        o.parent |> uint16 |> s.vout ret);
-    (* get_prop_len *) nul1op;
-    (* inc *) (fun i x ret ->
-        let var = x |> s.vin_direct
-        (((var |> s.readVariable |> int16) + 1s) |> uint16, var) ||> s.writeVariable);
-    (* dec *) nul1op;
-    (* print_addr *) nul1op;
-    (* call_1s *) nul1op;
-    (* remove_obj *) nul1op;
-    (* print_obj *) (fun _ x _ ->
-        let o = x |> s.vin_addr |> s.readObj
-        o.name.s |> _out);
-    (* ret *) (fun i x ret -> ip <- x |> s.vin |> s.ret);
-    (* jump *) (fun i x ret -> ip <- ip + i.length + (x |> s.vin_i16 |> int) - 2);
-    (* print_paddr *) (fun i x ret ->
-        let o = x |> s.vin_paddr |> s.readString
-        o.s |> _out);
-    (* load *) nul1op;
-    (* not *) nul1op;
-    (* call_1n *) nul1op;
+        (fun i x _ -> (* jz *)
+            (x |> s.vin) = 0us |> jump i);
+        (fun i x ret -> (* get_sibling *)
+            let o = x |> s.vin_addr |> s.readObj
+            (o.sibling |> uint16 |>> s.vout ret) <> 0us |> jump i);
+        (fun i x ret -> (* get_child *)
+            let o = x |> s.vin_addr |> s.readObj
+            (o.child |> uint16 |>> s.vout ret) <> 0us |> jump i);
+        (fun _ x ret -> (* get_parent *)
+            let o = x |> s.vin_addr |> s.readObj
+            o.parent |> uint16 |> s.vout ret);
+        (fun _ x ret ->  (* get_prop_len *)
+            let addr = x |> s.vin_addr
+            if addr = 0 then
+                0us |> s.vout ret
+            else
+                let prop = addr |> int |> s.readPropAtAddr
+                prop.len |> uint16 |> s.vout ret);
+        (fun _ x _ -> (* inc *)
+            let var = x |> s.vin_direct
+            (((var |> s.readVariable |> int16) + 1s) |> uint16, var) ||> s.writeVariable);
+        (fun _ x _ -> (* dec *)
+            let var = x |> s.vin_direct
+            (((var |> s.readVariable |> int16) - 1s) |> uint16, var) ||> s.writeVariable);
+        nul1op; (* print_addr *)
+        nul1op; (* call_1s *)
+        nul1op; (* remove_obj *)
+        (fun _ x _ -> (* print_obj *)
+            let o = x |> s.vin_addr |> s.readObj
+            o.name.s |> _out);
+        (fun _ x _ -> (* ret *)
+            ip <- x |> s.vin |> s.ret);
+        (fun i x _ -> (* jump *)
+            ip <- ip + i.length + (x |> s.vin_i16 |> int) - 2);
+        (fun _ x _ -> (* print_paddr *)
+            let o = x |> s.vin_paddr |> s.readString
+            o.s |> _out);
+        (fun _ x ret -> (* load *)
+            x |> s.vin_direct |> s.readVariableIndirect |> s.vout ret);
+        (fun _ x ret -> (* not *)
+            let x = x |> s.vin
+            ~~~x |> s.vout ret);
+        nul1op; (* call_1n *)
     |]
 
     let nul0op = fun (op:instruction) _ret -> _flush (); failwith <| sprintf "Unimplmented 0op instruction %s" names0op.[op.opcode]
@@ -351,7 +420,7 @@ type Machine(filename) = class
     (* restore *) nul0op;
     (* restart *) nul0op;
     (* ret_popped *) (fun _ _ -> ip <- s.readVariable 0uy |> s.ret);
-    (* pop *) nul0op;
+    (* pop *) (fun _ _ -> s.readVariable 0uy |> ignore);
     (* quit *) nul0op;
     (* new_line *) (fun _ _ -> "\n" |> _out);
     (* show_status *) nul0op;
@@ -364,8 +433,14 @@ type Machine(filename) = class
     let nulvar = fun (op:instruction) ret -> _flush (); failwith <| sprintf "Unimplemented var instruction %s" namesvar.[op.opcode]
     let instructionsvar =[|
     (* call*) (fun i ret -> ip <- s.call(i.args.[0] |> s.vin |> s.paddr) (ip + i.length) ret (seq { for x in i.args.[1..] do yield x |> s.vin done } |> Seq.toArray));
-    (* storew*) (fun i ret -> (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin) |> s.paddr |> s.write16 (i.args.[2] |> s.vin));
-    (* storeb*) nulvar;
+    (* storew*) (fun i _ret ->
+        (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin)
+        |> s.addr
+        |> s.write16 (i.args.[2] |> s.vin));
+    (* storeb*) (fun i _ret ->
+        (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin)
+        |> s.addr
+        |> s.write8 (i.args.[2] |> s.vin));
     (* put_prop*) (fun i _ -> i.args.[0] |> s.vin_addr |> s.readObj |> s.getProp (i.args.[1] |> s.vin_addr) |> s.writeProp (i.args.[2] |> s.vin));
     (* sread*) (fun i _ ->
         _flush ()
