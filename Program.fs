@@ -183,13 +183,7 @@ type Story(filename) = class
         | Small(x) -> x |> uint16
         | Omitted -> failwith "Omitted args have no value"
 
-    // some instructions pass in the variable number directly, these shouldn't go through readVariable
-    member _this.vin_direct = function
-        //| Variable(x) -> _readVariable x |> byte
-        | Large(x) -> x |> byte
-        | Small(x) -> x
-        | _ -> failwith "Bad direct argument"
-
+    member this.vin_direct = this.vin >> byte
     member this.vin_addr = this.vin >> _addr
     member this.vin_paddr = this.vin >> _paddr
     member this.vin_i16 = this.vin >> int16
@@ -317,7 +311,10 @@ type Machine(filename) = class
         (fun i x y _ -> (* jin *)
             let o = x |> s.vin_addr |> s.readObj
             o.parent = (y |> s.vin |> int) |> jump i);
-        nul2op; (* test *)
+        (fun i x y _ -> (* test *)
+            let x = x |> s.vin
+            let y = y |> s.vin
+            (x &&& y) = y |> jump i);
         (fun _ x y ret -> (* or *)
             (x |> s.vin) ||| (y |> s.vin) |> s.vout ret);
         (fun _ x y ret -> (* and *)
@@ -388,9 +385,12 @@ type Machine(filename) = class
         (fun _ x _ -> (* dec *)
             let var = x |> s.vin_direct
             (((var |> s.readVariable |> int16) - 1s) |> uint16, var) ||> s.writeVariable);
-        nul1op; (* print_addr *)
+        (fun _ x _ -> (* print_addr *)
+            let o = x |> s.vin_addr |> s.readString
+            o.s |> _out);
         nul1op; (* call_1s *)
-        nul1op; (* remove_obj *)
+        (fun _ x _ -> (* remove_obj *)
+            x |> s.vin_addr |> s.readObj |> s.removeObj |> ignore);
         (fun _ x _ -> (* print_obj *)
             let o = x |> s.vin_addr |> s.readObj
             o.name.s |> _out);
@@ -411,68 +411,82 @@ type Machine(filename) = class
 
     let nul0op = fun (op:instruction) _ret -> _flush (); failwith <| sprintf "Unimplmented 0op instruction %s" names0op.[op.opcode]
     let instructions0op = [|
-    (* rtrue *) (fun _ _ -> ip <- s.ret 1us);
-    (* rfalse *) (fun _ _ -> ip <- s.ret 0us);
-    (* print *) (fun i _ -> i.string |> _out);
-    (* print_ret *) nul0op;
-    (* no *) nul0op;
-    (* save *) nul0op;
-    (* restore *) nul0op;
-    (* restart *) nul0op;
-    (* ret_popped *) (fun _ _ -> ip <- s.readVariable 0uy |> s.ret);
-    (* pop *) (fun _ _ -> s.readVariable 0uy |> ignore);
-    (* quit *) nul0op;
-    (* new_line *) (fun _ _ -> "\n" |> _out);
-    (* show_status *) nul0op;
-    (* verify *) nul0op;
-    (* extended *) nul0op;
-    (* piracy *) nul0op;
+        (fun _ _ -> (* rtrue *)
+            ip <- s.ret 1us);
+        (fun _ _ -> (* rfalse *)
+            ip <- s.ret 0us);
+        (fun i _ -> (* print *)
+            i.string |> _out);
+        (fun i _ -> (* print_ret *)
+            i.string |> _out
+            ip <- s.ret 1us);
+        nul0op; (* no *)
+        nul0op; (* save *)
+        nul0op; (* restore *)
+        nul0op; (* restart *)
+        (fun _ _ -> (* ret_popped *)
+            ip <- s.readVariable 0uy |> s.ret);
+        (fun _ _ -> (* pop *)
+            s.readVariable 0uy |> ignore);
+        nul0op; (* quit *)
+        (fun _ _ -> (* new_line *)
+            "\n" |> _out);
+        nul0op; (* show_status *)
+        nul0op; (* verify *)
+        nul0op; (* extended *)
+        nul0op; (* piracy *)
     |]
 
     let trim_string len (str:string) = str.Substring(0, (str.Length, len) ||> min)
     let nulvar = fun (op:instruction) ret -> _flush (); failwith <| sprintf "Unimplemented var instruction %s" namesvar.[op.opcode]
     let instructionsvar =[|
-    (* call*) (fun i ret -> ip <- s.call(i.args.[0] |> s.vin |> s.paddr) (ip + i.length) ret (seq { for x in i.args.[1..] do yield x |> s.vin done } |> Seq.toArray));
-    (* storew*) (fun i _ret ->
-        (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin)
-        |> s.addr
-        |> s.write16 (i.args.[2] |> s.vin));
-    (* storeb*) (fun i _ret ->
-        (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin)
-        |> s.addr
-        |> s.write8 (i.args.[2] |> s.vin));
-    (* put_prop*) (fun i _ -> i.args.[0] |> s.vin_addr |> s.readObj |> s.getProp (i.args.[1] |> s.vin_addr) |> s.writeProp (i.args.[2] |> s.vin));
-    (* sread*) (fun i _ ->
-        _flush ()
-        let str = _in ()
-        str.ToLower() |> trim_string (i.args.[0] |> s.vin |> int) |> s.parseInput (i.args.[1] |> s.vin));
-    (* print_char*) (fun i _ -> i.args.[0] |> s.vin |> char |> sprintf "%c" |> _out);
-    (* print_num*) (fun i _ -> i.args.[0] |> s.vin |> sprintf "%d" |> _out);
-    (* random*) nulvar;
-    (* push*) (fun i _ -> s.writeVariable (i.args.[0] |> s.vin) 0uy);
-    (* pull*) (fun i _ -> i.args.[0] |> s.vin_direct |> byte |> s.writeVariable (s.readVariable 0uy));
-    (* split_window*) nulvar;
-    (* set_window*) nulvar;
-    (* call_vs2*) nulvar;
-    (* erase_window*) nulvar;
-    (* erase_line*) nulvar;
-    (* set_cursor*) nulvar;
-    (* get_cursor*) nulvar;
-    (* set_text_style*) nulvar;
-    (* buffer_mode*) nulvar;
-    (* output_stream*) nulvar;
-    (* input_stream*) nulvar;
-    (* sound_effect*) nulvar;
-    (* read_char*) nulvar;
-    (* scan_table*) nulvar;
-    (* not_v4*) nulvar;
-    (* call_vn*) nulvar;
-    (* call_vn2*) nulvar;
-    (* tokenise*) nulvar;
-    (* encode_text*) nulvar;
-    (* copy_table*) nulvar;
-    (* print_table*) nulvar;
-    (* check_arg_count*) nulvar;
+        (fun i ret -> (* call*)
+            ip <- s.call(i.args.[0] |> s.vin |> s.paddr) (ip + i.length) ret (seq { for x in i.args.[1..] -> x |> s.vin } |> Seq.toArray));
+        (fun i _ret -> (* storew*)
+            (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin)
+            |> s.addr
+            |> s.write16 (i.args.[2] |> s.vin));
+        (fun i _ret -> (* storeb*)
+            (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin)
+            |> s.addr
+            |> s.write8 (i.args.[2] |> s.vin));
+        (fun i _ -> (* put_prop*)
+            i.args.[0] |> s.vin_addr |> s.readObj |> s.getProp (i.args.[1] |> s.vin_addr) |> s.writeProp (i.args.[2] |> s.vin));
+        (fun i _ -> (* sread*)
+            _flush ()
+            let str = _in ()
+            str.ToLower() |> trim_string (i.args.[0] |> s.vin |> int) |> s.parseInput (i.args.[1] |> s.vin));
+        (fun i _ -> (* print_char*)
+            i.args.[0] |> s.vin |> char |> sprintf "%c" |> _out);
+        (fun i _ -> (* print_num*)
+            i.args.[0] |> s.vin |> sprintf "%d" |> _out);
+        nulvar; (* random*)
+        (fun i _ -> (* push*)
+            s.writeVariable (i.args.[0] |> s.vin) 0uy);
+        (fun i _ -> (* pull*)
+            i.args.[0] |> s.vin_direct |> byte |> s.writeVariableIndirect (s.readVariable 0uy));
+        nulvar; (* split_window*)
+        nulvar; (* set_window*)
+        nulvar; (* call_vs2*)
+        nulvar; (* erase_window*)
+        nulvar; (* erase_line*)
+        nulvar; (* set_cursor*)
+        nulvar; (* get_cursor*)
+        nulvar; (* set_text_style*)
+        nulvar; (* buffer_mode*)
+        nulvar; (* output_stream*)
+        nulvar; (* input_stream*)
+        nulvar; (* sound_effect*)
+        nulvar; (* read_char*)
+        nulvar; (* scan_table*)
+        nulvar; (* not_v4*)
+        nulvar; (* call_vn*)
+        nulvar; (* call_vn2*)
+        nulvar; (* tokenise*)
+        nulvar; (* encode_text*)
+        nulvar; (* copy_table*)
+        nulvar; (* print_table*)
+        nulvar; (* check_arg_count*)
     |]
 
     let decode_short op =
@@ -501,7 +515,7 @@ type Machine(filename) = class
             | 0x1uy -> size := !size + 1; Small(ip + !size - 1 |> s.read8)
             | _-> size := !size + 2; Large(ip + !size - 2 |> s.read16)
         let args =
-            seq { for x in 0..3 do yield generateArgs x } |>
+            seq { for x in 0..3 -> generateArgs x } |>
             Seq.filter (fun x -> match x with | Omitted -> false | _ -> true) |>
             Seq.toArray
         { emptyInstruction with
