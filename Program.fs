@@ -7,10 +7,7 @@ type zstring = { s:string; length:int; offset:int}
 let emptyString = { s=""; length=0; offset=0 }
 
 type zobject = { num:int; attrib:uint32; parent:int; sibling:int; child:int; addr:int; name:zstring }
-let defaultObject = {num=0; attrib=0u; parent=0; sibling=0; child=0; addr=0; name=emptyString }
-
 type zproperty = { num:int; len:int; addr:int }
-let defaultProperty = { num=0; len=0; addr=0 }
 
 type operand = Large of uint16 | Small of byte | Variable of byte | Omitted
 type encoding = Op0 | Op1 | Op2 | Var
@@ -124,7 +121,7 @@ type Story(filename) = class
         if index = 0 then failwith "Cannot read object 0" else
             let addr = (_read16 0xa |> int) + 31 * 2 + (index - 1) * 9
             let prop_addr = addr + 7 |> _read16 |> int
-            { defaultObject with
+            {
                 num=index;
                 attrib=(addr+0 |> _read16 |> uint32) <<< 16 ||| (addr+2 |> _read16 |> uint32);
                 parent = addr+4 |> _read8 |> int;
@@ -271,9 +268,13 @@ type Machine(filename) = class
     let mutable _out = fun (x:string) -> outbuf <- outbuf + x
     let mutable _flush = fun _ -> printf "%s" outbuf; outbuf <- ""
 
-    let read (x, y) = (s.vin x, s.vin y)
-    let read_i16 (x, y) = (s.vin_i16 x, s.vin_i16 y)
+    let read2 (x, y) = (s.vin x, s.vin y)
+    let read2_i16 (x, y) = (s.vin_i16 x, s.vin_i16 y)
     let read_obj x = x |> s.vin_addr |> s.readObj
+
+    let write i x = s.vout i x
+    let write_i16 i x = x |> uint16 |> s.vout i
+    let write_obj o = s.writeObj o
 
     let jump (i:instruction) x =
         if x = i.compare then
@@ -299,9 +300,9 @@ type Machine(filename) = class
             |> Seq.contains true
             |> jump i);
         (fun i x y _ -> (* jl *)
-            (x, y) |> read_i16 ||> (<) |> jump i);
+            (x, y) |> read2_i16 ||> (<) |> jump i);
         (fun i x y _ -> (* jg *)
-            (x, y) |> read_i16 ||> (>) |> jump i);
+            (x, y) |> read2_i16 ||> (>) |> jump i);
         (fun i x y _ -> (* dec_chk *)
             let var = x |> s.vin_direct
             let old = var |> s.readVariable |> int16
@@ -316,46 +317,46 @@ type Machine(filename) = class
             let o = x |> read_obj
             o.parent = (y |> s.vin |> int) |> jump i);
         (fun i x y _ -> (* test *)
-            let (x, y) = (x, y) |> read
+            let (x, y) = (x, y) |> read2
             (x &&& y) = y |> jump i);
         (fun _ x y ret -> (* or *)
-            (x, y) |> read ||> (|||) |> s.vout ret);
+            (x, y) |> read2 ||> (|||) |> s.vout ret);
         (fun _ x y ret -> (* and *)
-            (x, y) |> read ||> (&&&) |> s.vout ret);
+            (x, y) |> read2 ||> (&&&) |> s.vout ret);
         (fun i x y _ -> (* test_attr *)
             let o = x |> read_obj
             (o.attrib &&& (attr_bit y)) <> 0u |> jump i);
         (fun _ x y _ -> (* set_attr *)
             let o = x |> read_obj
-            { o with attrib=o.attrib ||| (attr_bit y) } |> s.writeObj);
+            { o with attrib=o.attrib ||| (attr_bit y) } |> write_obj);
         (fun _ x y _ -> (* clear_attr *)
             let o = x |> read_obj
-            { o with attrib=o.attrib &&& ~~~(attr_bit y) } |> s.writeObj);
+            { o with attrib=o.attrib &&& ~~~(attr_bit y) } |> write_obj);
         (fun _ x y _ -> (* store *)
             (x |> s.vin_direct) |> s.writeVariableIndirect (y |> s.vin));
         (fun _ x y _ -> (* insert_obj *)
             (x |> read_obj, y |> s.vin |> int) ||> s.insertObj);
         (fun _ x y ret -> (* loadw *)
-            (x |> s.vin) + 2us * (y |> s.vin) |> s.addr |> s.read16 |> s.vout ret);
+            (x |> s.vin) + 2us * (y |> s.vin) |> s.addr |> s.read16 |> write ret);
         (fun _ x y ret -> (* loadb *)
-            (x, y) |> read ||> (+) |> s.addr |> s.read8 |> uint16 |> s.vout ret);
+            (x, y) |> read2 ||> (+) |> s.addr |> s.read8 |> uint16 |> write ret);
         (fun _ x y ret -> (* get_prop *)
-            x |> read_obj |> s.getProp (y |> s.vin |> int) |> s.readProp |> s.vout ret);
+            x |> read_obj |> s.getProp (y |> s.vin |> int) |> s.readProp |> write ret);
         (fun _ x y ret ->  (* get_prop_addr *)
             let prop = x |> read_obj |> s.getProp (y |> s.vin |> int)
-            prop.addr |> uint16 |> s.vout ret);
+            prop.addr |> uint16 |> write ret);
         (fun _ x y ret -> (* get_next_prop *)
-            x |> read_obj |> s.getNextProp (y |> s.vin |> int) |> s.vout ret);
+            x |> read_obj |> s.getNextProp (y |> s.vin |> int) |> write ret);
         (fun _ x y ret -> (* add *)
-            (x, y) |> read_i16 ||> (+) |> uint16 |> s.vout ret);
+            (x, y) |> read2_i16 ||> (+) |> write_i16 ret);
         (fun _ x y ret -> (* sub *)
-            (x, y) |> read_i16 ||> (-) |> uint16 |> s.vout ret);
+            (x, y) |> read2_i16 ||> (-) |> write_i16 ret);
         (fun _ x y ret -> (* mul *)
-            (x, y) |> read_i16 ||> (*) |> uint16 |> s.vout ret);
+            (x, y) |> read2_i16 ||> (*) |> write_i16 ret);
         (fun _ x y ret -> (* div *)
-            (x, y) |> read_i16 ||> (/) |> uint16 |> s.vout ret);
+            (x, y) |> read2_i16 ||> (/) |> write_i16 ret);
         (fun _ x y ret -> (* mod *)
-            (x, y) |> read_i16 ||> (%) |> uint16 |> s.vout ret);
+            (x, y) |> read2_i16 ||> (%) |> write_i16 ret);
         nul2op; (* call_2s *)
         nul2op; (* call_2n *)
         nul2op; (* set_colour *)
@@ -368,20 +369,20 @@ type Machine(filename) = class
             (x |> s.vin) = 0us |> jump i);
         (fun i x ret -> (* get_sibling *)
             let o = x |> read_obj
-            (o.sibling |> uint16 |>> s.vout ret) <> 0us |> jump i);
+            (o.sibling |> uint16 |>> write ret) <> 0us |> jump i);
         (fun i x ret -> (* get_child *)
             let o = x |> read_obj
-            (o.child |> uint16 |>> s.vout ret) <> 0us |> jump i);
+            (o.child |> uint16 |>> write ret) <> 0us |> jump i);
         (fun _ x ret -> (* get_parent *)
             let o = x |> read_obj
-            o.parent |> uint16 |> s.vout ret);
+            o.parent |> uint16 |> write ret);
         (fun _ x ret ->  (* get_prop_len *)
             let addr = x |> s.vin_addr
             if addr = 0 then
-                0us |> s.vout ret
+                0us |> write ret
             else
                 let prop = addr |> int |> s.readPropAtAddr
-                prop.len |> uint16 |> s.vout ret);
+                prop.len |> uint16 |> write ret);
         (fun _ x _ -> (* inc *)
             let var = x |> s.vin_direct
             (((var |> s.readVariable |> int16) + 1s) |> uint16, var) ||> s.writeVariable);
@@ -405,10 +406,10 @@ type Machine(filename) = class
             let o = x |> s.vin_paddr |> s.readString
             o.s |> _out);
         (fun _ x ret -> (* load *)
-            x |> s.vin_direct |> s.readVariableIndirect |> s.vout ret);
+            x |> s.vin_direct |> s.readVariableIndirect |> write ret);
         (fun _ x ret -> (* not *)
             let x = x |> s.vin
-            ~~~x |> s.vout ret);
+            ~~~x |> write ret);
         nul1op; (* call_1n *)
     |]
 
