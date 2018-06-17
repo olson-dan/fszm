@@ -69,11 +69,11 @@ type Story(filename) = class
         pumpString str ShiftZero l
 
     let dynamic_start = 0
-    let dynamic_end = _read16 0xe |> int
-    let static_start = dynamic_end
-    let static_end = static_start + (min mem.Length 0xffff)
-    let high_start = _read16 0x4 |> int
-    let high_end = mem.Length
+    //let dynamic_end = _read16 0xe |> int
+    //let static_start = dynamic_end
+    //let static_end = static_start + (min mem.Length 0xffff)
+    //let high_start = _read16 0x4 |> int
+    //let high_end = mem.Length
     let globals = _read16 0xc |> int
 
     let mutable (stack:uint16 array) = [| |]
@@ -257,7 +257,7 @@ type Story(filename) = class
         let addr = obj.addr + 1 + obj.name.length
         iterProperties (index = 0) addr |> uint16
 
-    member this.parseInput max_parse (input : string) =
+    member _this.parseInput _max_parse (_input : string) =
         ()
 end
 
@@ -270,6 +270,10 @@ type Machine(filename) = class
     let mutable _in = fun _ -> Console.ReadLine()
     let mutable _out = fun (x:string) -> outbuf <- outbuf + x
     let mutable _flush = fun _ -> printf "%s" outbuf; outbuf <- ""
+
+    let read (x, y) = (s.vin x, s.vin y)
+    let read_i16 (x, y) = (s.vin_i16 x, s.vin_i16 y)
+    let read_obj x = x |> s.vin_addr |> s.readObj
 
     let jump (i:instruction) x =
         if x = i.compare then
@@ -286,7 +290,7 @@ type Machine(filename) = class
     let namesvar = [| "call"; "storew"; "storeb"; "put_prop"; "sread"; "print_char"; "print_num"; "random"; "push"; "pull"; "split_window"; "set_window"; "call_vs2"; "erase_window"; "erase_line"; "set_cursor"; "get_cursor"; "set_text_style"; "buffer_mode"; "output_stream"; "input_stream"; "sound_effect"; "read_char"; "scan_table"; "not_v4"; "call_vn"; "call_vn2"; "tokenise"; "encode_text"; "copy_table"; "print_table"; "check_arg_count" |]
 
     let attr_bit x = 1u <<< (31 - (x |> s.vin |>int))
-    let nul2op = fun (op:instruction) x y ret -> _flush (); failwith <| sprintf "Unimplemented 2op instruction %s" names2op.[op.opcode]
+    let nul2op = fun (op:instruction) _ _ _ -> _flush (); failwith <| sprintf "Unimplemented 2op instruction %s" names2op.[op.opcode]
     let instructions2op = [|
         nul2op; (* none *)
         (fun i x _y _ret -> (* je *)
@@ -295,9 +299,9 @@ type Machine(filename) = class
             |> Seq.contains true
             |> jump i);
         (fun i x y _ -> (* jl *)
-            (x |> s.vin_i16) < (y |> s.vin_i16) |> jump i);
+            (x, y) |> read_i16 ||> (<) |> jump i);
         (fun i x y _ -> (* jg *)
-            (x |> s.vin_i16) > (y |> s.vin_i16) |> jump i);
+            (x, y) |> read_i16 ||> (>) |> jump i);
         (fun i x y _ -> (* dec_chk *)
             let var = x |> s.vin_direct
             let old = var |> s.readVariable |> int16
@@ -309,68 +313,67 @@ type Machine(filename) = class
             var |> s.writeVariable (old + 1s |> uint16)
             old + 1s > (y |> s.vin_i16) |> jump i);
         (fun i x y _ -> (* jin *)
-            let o = x |> s.vin_addr |> s.readObj
+            let o = x |> read_obj
             o.parent = (y |> s.vin |> int) |> jump i);
         (fun i x y _ -> (* test *)
-            let x = x |> s.vin
-            let y = y |> s.vin
+            let (x, y) = (x, y) |> read
             (x &&& y) = y |> jump i);
         (fun _ x y ret -> (* or *)
-            (x |> s.vin) ||| (y |> s.vin) |> s.vout ret);
+            (x, y) |> read ||> (|||) |> s.vout ret);
         (fun _ x y ret -> (* and *)
-            (x |> s.vin) &&& (y |> s.vin) |> s.vout ret);
+            (x, y) |> read ||> (&&&) |> s.vout ret);
         (fun i x y _ -> (* test_attr *)
-            let o = x |> s.vin_addr |> s.readObj
+            let o = x |> read_obj
             (o.attrib &&& (attr_bit y)) <> 0u |> jump i);
         (fun _ x y _ -> (* set_attr *)
-            let o = x |> s.vin_addr |> s.readObj
+            let o = x |> read_obj
             { o with attrib=o.attrib ||| (attr_bit y) } |> s.writeObj);
         (fun _ x y _ -> (* clear_attr *)
-            let o = x |> s.vin_addr |> s.readObj
+            let o = x |> read_obj
             { o with attrib=o.attrib &&& ~~~(attr_bit y) } |> s.writeObj);
         (fun _ x y _ -> (* store *)
             (x |> s.vin_direct) |> s.writeVariableIndirect (y |> s.vin));
         (fun _ x y _ -> (* insert_obj *)
-            (x |> s.vin |> int |> s.readObj, y |> s.vin |> int) ||> s.insertObj);
+            (x |> read_obj, y |> s.vin |> int) ||> s.insertObj);
         (fun _ x y ret -> (* loadw *)
             (x |> s.vin) + 2us * (y |> s.vin) |> s.addr |> s.read16 |> s.vout ret);
         (fun _ x y ret -> (* loadb *)
-            (x |> s.vin) + (y |> s.vin) |> s.addr |> s.read8 |> uint16 |> s.vout ret);
+            (x, y) |> read ||> (+) |> s.addr |> s.read8 |> uint16 |> s.vout ret);
         (fun _ x y ret -> (* get_prop *)
-            x |> s.vin_addr |> s.readObj |> s.getProp (y |> s.vin |> int) |> s.readProp |> s.vout ret);
+            x |> read_obj |> s.getProp (y |> s.vin |> int) |> s.readProp |> s.vout ret);
         (fun _ x y ret ->  (* get_prop_addr *)
-            let prop = x |> s.vin_addr |> s.readObj |> s.getProp (y |> s.vin |> int)
+            let prop = x |> read_obj |> s.getProp (y |> s.vin |> int)
             prop.addr |> uint16 |> s.vout ret);
         (fun _ x y ret -> (* get_next_prop *)
-            x |> s.vin_addr |> s.readObj |> s.getNextProp (y |> s.vin |> int) |> s.vout ret);
+            x |> read_obj |> s.getNextProp (y |> s.vin |> int) |> s.vout ret);
         (fun _ x y ret -> (* add *)
-            (x |> s.vin_i16) + (y |> s.vin_i16) |> uint16 |> s.vout ret);
+            (x, y) |> read_i16 ||> (+) |> uint16 |> s.vout ret);
         (fun _ x y ret -> (* sub *)
-            (x |> s.vin_i16) - (y |> s.vin_i16) |> uint16 |> s.vout ret);
+            (x, y) |> read_i16 ||> (-) |> uint16 |> s.vout ret);
         (fun _ x y ret -> (* mul *)
-            (x |> s.vin_i16) * (y |> s.vin_i16) |> uint16 |> s.vout ret);
+            (x, y) |> read_i16 ||> (*) |> uint16 |> s.vout ret);
         (fun _ x y ret -> (* div *)
-            (x |> s.vin_i16) / (y |> s.vin_i16) |> uint16 |> s.vout ret);
+            (x, y) |> read_i16 ||> (/) |> uint16 |> s.vout ret);
         (fun _ x y ret -> (* mod *)
-            (x |> s.vin_i16) % (y |> s.vin_i16) |> uint16 |> s.vout ret);
+            (x, y) |> read_i16 ||> (%) |> uint16 |> s.vout ret);
         nul2op; (* call_2s *)
         nul2op; (* call_2n *)
         nul2op; (* set_colour *)
         nul2op; (* throw *)
     |]
 
-    let nul1op = fun (op:instruction) x ret -> _flush (); failwith <| sprintf "Unimplemented 1op instruction %s" names1op.[op.opcode]
+    let nul1op = fun (op:instruction) _ _ -> _flush (); failwith <| sprintf "Unimplemented 1op instruction %s" names1op.[op.opcode]
     let instructions1op = [|
         (fun i x _ -> (* jz *)
             (x |> s.vin) = 0us |> jump i);
         (fun i x ret -> (* get_sibling *)
-            let o = x |> s.vin_addr |> s.readObj
+            let o = x |> read_obj
             (o.sibling |> uint16 |>> s.vout ret) <> 0us |> jump i);
         (fun i x ret -> (* get_child *)
-            let o = x |> s.vin_addr |> s.readObj
+            let o = x |> read_obj
             (o.child |> uint16 |>> s.vout ret) <> 0us |> jump i);
         (fun _ x ret -> (* get_parent *)
-            let o = x |> s.vin_addr |> s.readObj
+            let o = x |> read_obj
             o.parent |> uint16 |> s.vout ret);
         (fun _ x ret ->  (* get_prop_len *)
             let addr = x |> s.vin_addr
@@ -390,9 +393,9 @@ type Machine(filename) = class
             o.s |> _out);
         nul1op; (* call_1s *)
         (fun _ x _ -> (* remove_obj *)
-            x |> s.vin_addr |> s.readObj |> s.removeObj |> ignore);
+            x |> read_obj |> s.removeObj |> ignore);
         (fun _ x _ -> (* print_obj *)
-            let o = x |> s.vin_addr |> s.readObj
+            let o = x |> read_obj
             o.name.s |> _out);
         (fun _ x _ -> (* ret *)
             ip <- x |> s.vin |> s.ret);
@@ -438,7 +441,7 @@ type Machine(filename) = class
     |]
 
     let trim_string len (str:string) = str.Substring(0, (str.Length, len) ||> min)
-    let nulvar = fun (op:instruction) ret -> _flush (); failwith <| sprintf "Unimplemented var instruction %s" namesvar.[op.opcode]
+    let nulvar = fun (op:instruction) _ -> _flush (); failwith <| sprintf "Unimplemented var instruction %s" namesvar.[op.opcode]
     let instructionsvar =[|
         (fun i ret -> (* call*)
             ip <- s.call(i.args.[0] |> s.vin |> s.paddr) (ip + i.length) ret (seq { for x in i.args.[1..] -> x |> s.vin } |> Seq.toArray));
