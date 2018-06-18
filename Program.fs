@@ -221,15 +221,15 @@ type Story(filename) = class
             else
                 let rec getSibling i =
                     let o = i |> _readObj
-                    if i = obj.num then o else getSibling o.sibling
+                    if o.sibling = obj.num then o else getSibling o.sibling
                 let child = parent.child |> getSibling
-                { child with sibling = obj.sibling } |> _writeObj
-        { obj with parent=0; sibling = 0 } |>> _writeObj
+                { child with sibling=obj.sibling } |> _writeObj
+        { obj with parent=0; sibling=0 } |>> _writeObj
 
     member this.insertObj (obj : zobject) (dest : int) =
         let obj = obj |> this.removeObj
         let dest = dest |> _readObj
-        { (obj |> this.removeObj) with sibling=dest.child; parent=dest.num } |> _writeObj
+        { obj with sibling=dest.child; parent=dest.num } |> _writeObj
         { dest with child=obj.num } |> _writeObj
 
     member _this.getProp (index : int) (obj : zobject) =
@@ -294,15 +294,13 @@ type Machine(filename) = class
     let nul2op = fun (op:instruction) _ _ _ -> _flush (); failwith <| sprintf "Unimplemented 2op instruction %s" names2op.[op.opcode]
     let instructions2op = [|
         nul2op; (* none *)
-        (fun i x _y _ret -> (* je *)
+        (fun i x _ _ -> (* je *)
             let x = x |> s.vin
-            seq { for y in i.args.[1..] -> x = (y |> s.vin) }
+            seq { for a in i.args.[1..] -> x = (a |> s.vin) }
             |> Seq.contains true
             |> jump i);
-        (fun i x y _ -> (* jl *)
-            (x, y) |> read2_i16 ||> (<) |> jump i);
-        (fun i x y _ -> (* jg *)
-            (x, y) |> read2_i16 ||> (>) |> jump i);
+        (fun i x y _ -> (* jl *) (x, y) |> read2_i16 ||> (<) |> jump i);
+        (fun i x y _ -> (* jg *) (x, y) |> read2_i16 ||> (>) |> jump i);
         (fun i x y _ -> (* dec_chk *)
             let var = x |> s.vin_direct
             let old = var |> s.readVariable |> int16
@@ -314,15 +312,12 @@ type Machine(filename) = class
             var |> s.writeVariable (old + 1s |> uint16)
             old + 1s > (y |> s.vin_i16) |> jump i);
         (fun i x y _ -> (* jin *)
-            let o = x |> read_obj
-            o.parent = (y |> s.vin |> int) |> jump i);
+            (x |> read_obj).parent = (y |> s.vin |> int) |> jump i);
         (fun i x y _ -> (* test *)
             let (x, y) = (x, y) |> read2
             (x &&& y) = y |> jump i);
-        (fun _ x y ret -> (* or *)
-            (x, y) |> read2 ||> (|||) |> s.vout ret);
-        (fun _ x y ret -> (* and *)
-            (x, y) |> read2 ||> (&&&) |> s.vout ret);
+        (fun _ x y ret -> (* or *)  (x, y) |> read2 ||> (|||) |> s.vout ret);
+        (fun _ x y ret -> (* and *) (x, y) |> read2 ||> (&&&) |> s.vout ret);
         (fun i x y _ -> (* test_attr *)
             let o = x |> read_obj
             (o.attrib &&& (attr_bit y)) <> 0u |> jump i);
@@ -335,7 +330,7 @@ type Machine(filename) = class
         (fun _ x y _ -> (* store *)
             (x |> s.vin_direct) |> s.writeVariableIndirect (y |> s.vin));
         (fun _ x y _ -> (* insert_obj *)
-            (x |> read_obj, y |> s.vin |> int) ||> s.insertObj);
+            (x |> read_obj, y |> s.vin_addr) ||> s.insertObj);
         (fun _ x y ret -> (* loadw *)
             (x |> s.vin) + 2us * (y |> s.vin) |> s.addr |> s.read16 |> write ret);
         (fun _ x y ret -> (* loadb *)
@@ -347,16 +342,11 @@ type Machine(filename) = class
             prop.addr |> uint16 |> write ret);
         (fun _ x y ret -> (* get_next_prop *)
             x |> read_obj |> s.getNextProp (y |> s.vin |> int) |> write ret);
-        (fun _ x y ret -> (* add *)
-            (x, y) |> read2_i16 ||> (+) |> write_i16 ret);
-        (fun _ x y ret -> (* sub *)
-            (x, y) |> read2_i16 ||> (-) |> write_i16 ret);
-        (fun _ x y ret -> (* mul *)
-            (x, y) |> read2_i16 ||> (*) |> write_i16 ret);
-        (fun _ x y ret -> (* div *)
-            (x, y) |> read2_i16 ||> (/) |> write_i16 ret);
-        (fun _ x y ret -> (* mod *)
-            (x, y) |> read2_i16 ||> (%) |> write_i16 ret);
+        (fun _ x y ret -> (* add *) (x, y) |> read2_i16 ||> (+) |> write_i16 ret);
+        (fun _ x y ret -> (* sub *) (x, y) |> read2_i16 ||> (-) |> write_i16 ret);
+        (fun _ x y ret -> (* mul *) (x, y) |> read2_i16 ||> (*) |> write_i16 ret);
+        (fun _ x y ret -> (* div *) (x, y) |> read2_i16 ||> (/) |> write_i16 ret);
+        (fun _ x y ret -> (* mod *) (x, y) |> read2_i16 ||> (%) |> write_i16 ret);
         nul2op; (* call_2s *)
         nul2op; (* call_2n *)
         nul2op; (* set_colour *)
@@ -365,17 +355,13 @@ type Machine(filename) = class
 
     let nul1op = fun (op:instruction) _ _ -> _flush (); failwith <| sprintf "Unimplemented 1op instruction %s" names1op.[op.opcode]
     let instructions1op = [|
-        (fun i x _ -> (* jz *)
-            (x |> s.vin) = 0us |> jump i);
+        (fun i x _ -> (* jz *) (x |> s.vin) = 0us |> jump i);
         (fun i x ret -> (* get_sibling *)
-            let o = x |> read_obj
-            (o.sibling |> uint16 |>> write ret) <> 0us |> jump i);
+            ((x |> read_obj).sibling  |> uint16 |>> write ret) <> 0us |> jump i);
         (fun i x ret -> (* get_child *)
-            let o = x |> read_obj
-            (o.child |> uint16 |>> write ret) <> 0us |> jump i);
+            ((x |> read_obj).child |> uint16 |>> write ret) <> 0us |> jump i);
         (fun _ x ret -> (* get_parent *)
-            let o = x |> read_obj
-            o.parent |> uint16 |> write ret);
+            (x |> read_obj).parent |> uint16 |> write ret);
         (fun _ x ret ->  (* get_prop_len *)
             let addr = x |> s.vin_addr
             if addr = 0 then
@@ -389,38 +375,25 @@ type Machine(filename) = class
         (fun _ x _ -> (* dec *)
             let var = x |> s.vin_direct
             (((var |> s.readVariable |> int16) - 1s) |> uint16, var) ||> s.writeVariable);
-        (fun _ x _ -> (* print_addr *)
-            let o = x |> s.vin_addr |> s.readString
-            o.s |> _out);
+        (fun _ x _ -> (* print_addr *) (x |> s.vin_addr |> s.readString).s |> _out);
         nul1op; (* call_1s *)
-        (fun _ x _ -> (* remove_obj *)
-            x |> read_obj |> s.removeObj |> ignore);
-        (fun _ x _ -> (* print_obj *)
-            let o = x |> read_obj
-            o.name.s |> _out);
-        (fun _ x _ -> (* ret *)
-            ip <- x |> s.vin |> s.ret);
+        (fun _ x _ -> (* remove_obj *) x |> read_obj |> s.removeObj |> ignore);
+        (fun _ x _ -> (* print_obj *) (x |> read_obj).name.s |> _out);
+        (fun _ x _ -> (* ret *) ip <- x |> s.vin |> s.ret);
         (fun i x _ -> (* jump *)
             ip <- ip + i.length + (x |> s.vin_i16 |> int) - 2);
-        (fun _ x _ -> (* print_paddr *)
-            let o = x |> s.vin_paddr |> s.readString
-            o.s |> _out);
+        (fun _ x _ -> (* print_paddr *) (x |> s.vin_paddr |> s.readString).s |> _out);
         (fun _ x ret -> (* load *)
             x |> s.vin_direct |> s.readVariableIndirect |> write ret);
-        (fun _ x ret -> (* not *)
-            let x = x |> s.vin
-            ~~~x |> write ret);
+        (fun _ x ret -> (* not *) x |> s.vin |> (~~~) |> write ret);
         nul1op; (* call_1n *)
     |]
 
     let nul0op = fun (op:instruction) _ret -> _flush (); failwith <| sprintf "Unimplmented 0op instruction %s" names0op.[op.opcode]
     let instructions0op = [|
-        (fun _ _ -> (* rtrue *)
-            ip <- s.ret 1us);
-        (fun _ _ -> (* rfalse *)
-            ip <- s.ret 0us);
-        (fun i _ -> (* print *)
-            i.string |> _out);
+        (fun _ _ -> (* rtrue *)  ip <- s.ret 1us);
+        (fun _ _ -> (* rfalse *) ip <- s.ret 0us);
+        (fun i _ -> (* print *) i.string |> _out);
         (fun i _ -> (* print_ret *)
             i.string |> _out
             ip <- s.ret 1us);
@@ -428,13 +401,10 @@ type Machine(filename) = class
         nul0op; (* save *)
         nul0op; (* restore *)
         nul0op; (* restart *)
-        (fun _ _ -> (* ret_popped *)
-            ip <- s.readVariable 0uy |> s.ret);
-        (fun _ _ -> (* pop *)
-            s.readVariable 0uy |> ignore);
+        (fun _ _ -> (* ret_popped *) ip <- s.readVariable 0uy |> s.ret);
+        (fun _ _ -> (* pop *) s.readVariable 0uy |> ignore);
         nul0op; (* quit *)
-        (fun _ _ -> (* new_line *)
-            "\n" |> _out);
+        (fun _ _ -> (* new_line *) "\n" |> _out);
         nul0op; (* show_status *)
         nul0op; (* verify *)
         nul0op; (* extended *)
@@ -465,8 +435,7 @@ type Machine(filename) = class
         (fun i _ -> (* print_num*)
             i.args.[0] |> s.vin |> sprintf "%d" |> _out);
         nulvar; (* random*)
-        (fun i _ -> (* push*)
-            s.writeVariable (i.args.[0] |> s.vin) 0uy);
+        (fun i _ -> (* push*) s.writeVariable (i.args.[0] |> s.vin) 0uy);
         (fun i _ -> (* pull*)
             i.args.[0] |> s.vin_direct |> byte |> s.writeVariableIndirect (s.readVariable 0uy));
         nulvar; (* split_window*)
