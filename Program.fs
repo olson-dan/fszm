@@ -6,7 +6,7 @@ type shift = ShiftZero | ShiftOne | ShiftTwo
 type zstring = { s:string; length:int; offset:int}
 let emptyString = { s=""; length=0; offset=0 }
 
-type zobject = { num:int; attrib:uint32; parent:int; sibling:int; child:int; addr:int; name:zstring }
+type zobject = { num:uint16; attrib:uint32; parent:uint16; sibling:uint16; child:uint16; addr:int; name:zstring }
 type zproperty = { num:int; len:int; addr:int }
 
 type operand = Large of uint16 | Small of byte | Variable of byte | Omitted
@@ -118,27 +118,27 @@ type Story(filename) = class
         | x -> _writeLocal v x
 
     let _readObj index =
-        if index = 0 then failwith "Cannot read object 0" else
-            let addr = (_read16 0xa |> int) + 31 * 2 + (index - 1) * 9
+        if index = 0us then failwith "Cannot read object 0" else
+            let addr = (_read16 0xa |> int) + 31 * 2 + ((index |> int) - 1) * 9
             let prop_addr = addr + 7 |> _read16 |> int
             {
-                num=index;
+                num=index |> uint16;
                 attrib=(addr+0 |> _read16 |> uint32) <<< 16 ||| (addr+2 |> _read16 |> uint32);
-                parent = addr+4 |> _read8 |> int;
-                sibling = addr+5 |> _read8 |> int;
-                child = addr+6 |> _read8 |> int;
+                parent = addr+4 |> _read8 |> uint16;
+                sibling = addr+5 |> _read8 |> uint16;
+                child = addr+6 |> _read8 |> uint16;
                 addr = prop_addr;
                 name = prop_addr + 1 |> _readString
             }
 
     let _writeObj (o : zobject) =
         // don't bother re-writing string, it can't change.
-        let addr = (_read16 0xa |> int) + 31 * 2 + (o.num - 1) * 9
+        let addr = (_read16 0xa |> int) + 31 * 2 + ((o.num |> int) - 1) * 9
         addr + 0 |> _write16 ((o.attrib >>> 16) &&& 0xffffu |> uint16)
         addr + 2 |> _write16 (o.attrib &&& 0xffffu |> uint16)
-        addr + 4 |> _write8 (o.parent |> uint16)
-        addr + 5 |> _write8 (o.sibling |> uint16)
-        addr + 6 |> _write8 (o.child |> uint16)
+        addr + 4 |> _write8 o.parent
+        addr + 5 |> _write8 o.sibling
+        addr + 6 |> _write8 o.child
         addr + 7 |> _write16 (o.addr |> uint16)
 
     let _getProp x =
@@ -214,7 +214,7 @@ type Story(filename) = class
         retaddr
 
     member _this.removeObj (obj : zobject) =
-        if obj.parent <> 0 then
+        if obj.parent <> 0us then
             let parent = obj.parent |> _readObj
             if parent.child = obj.num then
                 { parent with child=obj.sibling } |> _writeObj
@@ -224,9 +224,9 @@ type Story(filename) = class
                     if o.sibling = obj.num then o else getSibling o.sibling
                 let child = parent.child |> getSibling
                 { child with sibling=obj.sibling } |> _writeObj
-        { obj with parent=0; sibling=0 } |>> _writeObj
+        { obj with parent=0us; sibling=0us } |>> _writeObj
 
-    member this.insertObj (obj : zobject) (dest : int) =
+    member this.insertObj (obj : zobject) (dest : uint16) =
         let obj = obj |> this.removeObj
         let dest = dest |> _readObj
         { obj with sibling=dest.child; parent=dest.num } |> _writeObj
@@ -267,15 +267,16 @@ type Machine(filename) = class
     let mutable _in = fun _ -> Console.ReadLine()
     let mutable _out = fun (x:string) -> outbuf <- outbuf + x
     let mutable _flush = fun _ -> printf "%s" outbuf; outbuf <- ""
-
     let mutable _rand = System.Random()
 
-    let read2 (x, y) = (s.vin x, s.vin y)
-    let read2_i16 (x, y) = (s.vin_i16 x, s.vin_i16 y)
-    let read_obj x = x |> s.vin_addr |> s.readObj
+    let read i = s.vin i.args.[0]
+    let read_addr i = s.vin_addr i.args.[0]
+    let read2 i = (s.vin i.args.[0], s.vin i.args.[1])
+    let read2_i16 i = (s.vin_i16 i.args.[0], s.vin_i16 i.args.[1])
+    let read_obj i = i.args.[0] |> s.vin_addr |> uint16 |> s.readObj
 
-    let write i x = s.vout i x
-    let write_i16 i x = x |> uint16 |> s.vout i
+    let write i x = x |> s.vout i.ret
+    let write_i16 i x = x |> uint16 |> s.vout i.ret
     let write_obj o = s.writeObj o
 
     let jump (i:instruction) x =
@@ -293,160 +294,159 @@ type Machine(filename) = class
     let namesvar = [| "call"; "storew"; "storeb"; "put_prop"; "sread"; "print_char"; "print_num"; "random"; "push"; "pull"; "split_window"; "set_window"; "call_vs2"; "erase_window"; "erase_line"; "set_cursor"; "get_cursor"; "set_text_style"; "buffer_mode"; "output_stream"; "input_stream"; "sound_effect"; "read_char"; "scan_table"; "not_v4"; "call_vn"; "call_vn2"; "tokenise"; "encode_text"; "copy_table"; "print_table"; "check_arg_count" |]
 
     let attr_bit x = 1u <<< (31 - (x |> s.vin |>int))
-    let nul2op = fun (op:instruction) _ _ _ -> _flush (); failwith <| sprintf "Unimplemented 2op instruction %s" names2op.[op.opcode]
+    let nul2op = fun (op:instruction) _ _ -> _flush (); failwith <| sprintf "Unimplemented 2op instruction %s" names2op.[op.opcode]
     let instructions2op = [|
         nul2op; (* none *)
-        (fun i x _ _ -> (* je *)
-            let x = x |> s.vin
+        (fun i x _ -> (* je *)
+            let x = i |> read
             seq { for a in i.args.[1..] -> x = (a |> s.vin) }
             |> Seq.contains true
             |> jump i);
-        (fun i x y _ -> (* jl *) (x, y) |> read2_i16 ||> (<) |> jump i);
-        (fun i x y _ -> (* jg *) (x, y) |> read2_i16 ||> (>) |> jump i);
-        (fun i x y _ -> (* dec_chk *)
-            let var = x |> s.vin_direct
+        (fun i x y -> (* jl *) i |> read2_i16 ||> (<) |> jump i);
+        (fun i x y -> (* jg *) i |> read2_i16 ||> (>) |> jump i);
+        (fun i x y -> (* dec_chk *)
+            let var = i |> read |> byte
             let old = var |> s.readVariable |> int16
             var |> s.writeVariable (old - 1s |> uint16)
             old - 1s < (y |> s.vin_i16) |> jump i);
-        (fun i x y _ -> (* inc_chk *)
-            let var = x |> s.vin_direct
+        (fun i x y -> (* inc_chk *)
+            let var = i |> read |> byte
             let old = var |> s.readVariable |> int16
             var |> s.writeVariable (old + 1s |> uint16)
             old + 1s > (y |> s.vin_i16) |> jump i);
-        (fun i x y _ -> (* jin *)
-            (x |> read_obj).parent = (y |> s.vin |> int) |> jump i);
-        (fun i x y _ -> (* test *)
-            let (x, y) = (x, y) |> read2
+        (fun i x y -> (* jin *)
+            (i |> read_obj).parent = (y |> s.vin) |> jump i);
+        (fun i x y -> (* test *)
+            let (x, y) = i |> read2
             (x &&& y) = y |> jump i);
-        (fun _ x y ret -> (* or *)  (x, y) |> read2 ||> (|||) |> s.vout ret);
-        (fun _ x y ret -> (* and *) (x, y) |> read2 ||> (&&&) |> s.vout ret);
-        (fun i x y _ -> (* test_attr *)
-            let o = x |> read_obj
-            (o.attrib &&& (attr_bit y)) <> 0u |> jump i);
-        (fun _ x y _ -> (* set_attr *)
-            let o = x |> read_obj
+        (fun i x y -> (* or *)  i |> read2 ||> (|||) |> write i);
+        (fun i x y -> (* and *) i |> read2 ||> (&&&) |> write i);
+        (fun i x y -> (* test_attr *)
+            ((i |> read_obj).attrib &&& (attr_bit y)) <> 0u |> jump i);
+        (fun i x y -> (* set_attr *)
+            let o = i |> read_obj
             { o with attrib=o.attrib ||| (attr_bit y) } |> write_obj);
-        (fun _ x y _ -> (* clear_attr *)
-            let o = x |> read_obj
+        (fun i x y -> (* clear_attr *)
+            let o = i |> read_obj
             { o with attrib=o.attrib &&& ~~~(attr_bit y) } |> write_obj);
-        (fun _ x y _ -> (* store *)
-            (x |> s.vin_direct) |> s.writeVariableIndirect (y |> s.vin));
-        (fun _ x y _ -> (* insert_obj *)
-            (x |> read_obj, y |> s.vin_addr) ||> s.insertObj);
-        (fun _ x y ret -> (* loadw *)
-            (x |> s.vin) + 2us * (y |> s.vin) |> s.addr |> s.read16 |> write ret);
-        (fun _ x y ret -> (* loadb *)
-            (x, y) |> read2 ||> (+) |> s.addr |> s.read8 |> uint16 |> write ret);
-        (fun _ x y ret -> (* get_prop *)
-            x |> read_obj |> s.getProp (y |> s.vin |> int) |> s.readProp |> write ret);
-        (fun _ x y ret ->  (* get_prop_addr *)
-            let prop = x |> read_obj |> s.getProp (y |> s.vin |> int)
-            prop.addr |> uint16 |> write ret);
-        (fun _ x y ret -> (* get_next_prop *)
-            x |> read_obj |> s.getNextProp (y |> s.vin |> int) |> write ret);
-        (fun _ x y ret -> (* add *) (x, y) |> read2_i16 ||> (+) |> write_i16 ret);
-        (fun _ x y ret -> (* sub *) (x, y) |> read2_i16 ||> (-) |> write_i16 ret);
-        (fun _ x y ret -> (* mul *) (x, y) |> read2_i16 ||> (*) |> write_i16 ret);
-        (fun _ x y ret -> (* div *) (x, y) |> read2_i16 ||> (/) |> write_i16 ret);
-        (fun _ x y ret -> (* mod *) (x, y) |> read2_i16 ||> (%) |> write_i16 ret);
+        (fun i x y -> (* store *)
+            i |> read |> byte |> s.writeVariableIndirect (y |> s.vin));
+        (fun i x y -> (* insert_obj *)
+            (i |> read_obj, y |> s.vin) ||> s.insertObj);
+        (fun i x y -> (* loadw *)
+            (x |> s.vin) + 2us * (y |> s.vin) |> s.addr |> s.read16 |> write i);
+        (fun i x y -> (* loadb *)
+            i |> read2 ||> (+) |> s.addr |> s.read8 |> uint16 |> write i);
+        (fun i x y -> (* get_prop *)
+            i |> read_obj |> s.getProp (y |> s.vin |> int) |> s.readProp |> write i);
+        (fun i x y -> (* get_prop_addr *)
+            let prop = i |> read_obj |> s.getProp (y |> s.vin |> int)
+            prop.addr |> uint16 |> write i);
+        (fun i x y -> (* get_next_prop *)
+            i |> read_obj |> s.getNextProp (y |> s.vin |> int) |> write i);
+        (fun i _ _ -> (* add *) i |> read2_i16 ||> (+) |> write_i16 i);
+        (fun i _ _ -> (* sub *) i |> read2_i16 ||> (-) |> write_i16 i);
+        (fun i _ _ -> (* mul *) i |> read2_i16 ||> (*) |> write_i16 i);
+        (fun i _ _ -> (* div *) i |> read2_i16 ||> (/) |> write_i16 i);
+        (fun i _ _ -> (* mod *) i |> read2_i16 ||> (%) |> write_i16 i);
         nul2op; (* call_2s *)
         nul2op; (* call_2n *)
         nul2op; (* set_colour *)
         nul2op; (* throw *)
     |]
 
-    let nul1op = fun (op:instruction) _ _ -> _flush (); failwith <| sprintf "Unimplemented 1op instruction %s" names1op.[op.opcode]
+    let nul1op = fun (op:instruction) _ -> _flush (); failwith <| sprintf "Unimplemented 1op instruction %s" names1op.[op.opcode]
     let instructions1op = [|
-        (fun i x _ -> (* jz *) (x |> s.vin) = 0us |> jump i);
-        (fun i x ret -> (* get_sibling *)
-            ((x |> read_obj).sibling  |> uint16 |>> write ret) <> 0us |> jump i);
-        (fun i x ret -> (* get_child *)
-            ((x |> read_obj).child |> uint16 |>> write ret) <> 0us |> jump i);
-        (fun _ x ret -> (* get_parent *)
-            (x |> read_obj).parent |> uint16 |> write ret);
-        (fun _ x ret ->  (* get_prop_len *)
-            let addr = x |> s.vin_addr
+        (fun i x -> (* jz *) (i |> read) = 0us |> jump i);
+        (fun i x -> (* get_sibling *)
+            ((i |> read_obj).sibling |>> write i) <> 0us |> jump i);
+        (fun i x -> (* get_child *)
+            ((i |> read_obj).child |>> write i) <> 0us |> jump i);
+        (fun i x -> (* get_parent *) (i |> read_obj).parent |> write i);
+        (fun i x ->  (* get_prop_len *)
+            let addr = i |> read_addr
             if addr = 0 then
-                0us |> write ret
+                0us |> write i
             else
                 let prop = addr |> int |> s.readPropAtAddr
-                prop.len |> uint16 |> write ret);
-        (fun _ x _ -> (* inc *)
-            let var = x |> s.vin_direct
+                prop.len |> uint16 |> write i);
+        (fun i x -> (* inc *)
+            let var = i |> read |> byte
             (((var |> s.readVariable |> int16) + 1s) |> uint16, var) ||> s.writeVariable);
-        (fun _ x _ -> (* dec *)
-            let var = x |> s.vin_direct
+        (fun i x -> (* dec *)
+            let var = i |> read |> byte
             (((var |> s.readVariable |> int16) - 1s) |> uint16, var) ||> s.writeVariable);
-        (fun _ x _ -> (* print_addr *) (x |> s.vin_addr |> s.readString).s |> _out);
+        (fun i x -> (* print_addr *) (i |> read_addr |> s.readString).s |> _out);
         nul1op; (* call_1s *)
-        (fun _ x _ -> (* remove_obj *) x |> read_obj |> s.removeObj |> ignore);
-        (fun _ x _ -> (* print_obj *) (x |> read_obj).name.s |> _out);
-        (fun _ x _ -> (* ret *) ip <- x |> s.vin |> s.ret);
-        (fun i x _ -> (* jump *)
-            ip <- ip + i.length + (x |> s.vin_i16 |> int) - 2);
-        (fun _ x _ -> (* print_paddr *) (x |> s.vin_paddr |> s.readString).s |> _out);
-        (fun _ x ret -> (* load *)
-            x |> s.vin_direct |> s.readVariableIndirect |> write ret);
-        (fun _ x ret -> (* not *) x |> s.vin |> (~~~) |> write ret);
+        (fun i x -> (* remove_obj *) i |> read_obj |> s.removeObj |> ignore);
+        (fun i x -> (* print_obj *) (i |> read_obj).name.s |> _out);
+        (fun i x -> (* ret *) ip <- i |> read |> s.ret);
+        (fun i x -> (* jump *)
+            ip <- ip + i.length + (i |> read |> int16 |> int) - 2);
+        (fun _ x -> (* print_paddr *) (x |> s.vin_paddr |> s.readString).s |> _out);
+        (fun i x -> (* load *)
+            i |> read |> byte |> s.readVariableIndirect |> write i);
+        (fun i x -> (* not *) i |> read |> (~~~) |> write i);
         nul1op; (* call_1n *)
     |]
 
-    let nul0op = fun (op:instruction) _ret -> _flush (); failwith <| sprintf "Unimplmented 0op instruction %s" names0op.[op.opcode]
+    let nul0op = fun (op:instruction) -> _flush (); failwith <| sprintf "Unimplmented 0op instruction %s" names0op.[op.opcode]
     let instructions0op = [|
-        (fun _ _ -> (* rtrue *)  ip <- s.ret 1us);
-        (fun _ _ -> (* rfalse *) ip <- s.ret 0us);
-        (fun i _ -> (* print *) i.string |> _out);
-        (fun i _ -> (* print_ret *)
+        (fun _ -> (* rtrue *)  ip <- s.ret 1us);
+        (fun _ -> (* rfalse *) ip <- s.ret 0us);
+        (fun i -> (* print *) i.string |> _out);
+        (fun i -> (* print_ret *)
             i.string + "\n" |> _out
             ip <- s.ret 1us);
         nul0op; (* no *)
         nul0op; (* save *)
         nul0op; (* restore *)
         nul0op; (* restart *)
-        (fun _ _ -> (* ret_popped *) ip <- s.readVariable 0uy |> s.ret);
-        (fun _ _ -> (* pop *) s.readVariable 0uy |> ignore);
-        (fun _ _ -> (* quit *) _flush (); finished <- true);
-        (fun _ _ -> (* new_line *) "\n" |> _out);
+        (fun _ -> (* ret_popped *) ip <- s.readVariable 0uy |> s.ret);
+        (fun _ -> (* pop *) s.readVariable 0uy |> ignore);
+        (fun _ -> (* quit *) _flush (); finished <- true);
+        (fun _ -> (* new_line *) "\n" |> _out);
         nul0op; (* show_status *)
-        (fun i _ -> (* verify *) true |> jump i);
+        (fun i -> (* verify *) true |> jump i);
         nul0op; (* extended *)
         nul0op; (* piracy *)
     |]
 
     let trim_string len (str:string) = str.Substring(0, (str.Length, len) ||> min)
-    let nulvar = fun (op:instruction) _ -> _flush (); failwith <| sprintf "Unimplemented var instruction %s" namesvar.[op.opcode]
+    let nulvar = fun (op:instruction) -> _flush (); failwith <| sprintf "Unimplemented var instruction %s" namesvar.[op.opcode]
     let instructionsvar =[|
-        (fun i ret -> (* call*)
-            ip <- s.call(i.args.[0] |> s.vin |> s.paddr) (ip + i.length) ret (seq { for x in i.args.[1..] -> x |> s.vin } |> Seq.toArray));
-        (fun i _ret -> (* storew*)
-            (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin)
+        (fun i -> (* call*)
+            let args = seq { for x in i.args.[1..] -> x |> s.vin } |> Seq.toArray
+            ip <- s.call(i |> read |> s.paddr) (ip + i.length) i.ret args);
+        (fun i -> (* storew*)
+            (i |> read) + 2us * (i.args.[1] |> s.vin)
             |> s.addr
             |> s.write16 (i.args.[2] |> s.vin));
-        (fun i _ret -> (* storeb*)
+        (fun i -> (* storeb*)
             (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin)
             |> s.addr
             |> s.write8 (i.args.[2] |> s.vin));
-        (fun i _ -> (* put_prop*)
-            i.args.[0] |> s.vin_addr |> s.readObj |> s.getProp (i.args.[1] |> s.vin_addr) |> s.writeProp (i.args.[2] |> s.vin));
-        (fun i _ -> (* sread*)
+        (fun i -> (* put_prop*)
+            i |> read_obj |> s.getProp (i.args.[1] |> s.vin_addr) |> s.writeProp (i.args.[2] |> s.vin));
+        (fun i -> (* sread*)
             _flush ()
             let str = _in ()
             str.ToLower() |> trim_string (i.args.[0] |> s.vin |> int) |> s.parseInput (i.args.[1] |> s.vin));
-        (fun i _ -> (* print_char*)
-            i.args.[0] |> s.vin |> char |> sprintf "%c" |> _out);
-        (fun i _ -> (* print_num*)
-            i.args.[0] |> s.vin_i16 |> sprintf "%d" |> _out);
-        (fun i ret -> (* random*)
-            let range = i.args.[0] |> s.vin_i16
+        (fun i -> (* print_char*)
+            i |> read |> char |> sprintf "%c" |> _out);
+        (fun i -> (* print_num*)
+            i |> read |> int16 |> sprintf "%d" |> _out);
+        (fun i -> (* random*)
+            let range = i |> read |> int16
             if range <= 0s then
                 _rand <- System.Random(range |> int)
-                0us |> write (ret |> debugPrint)
+                0us |> write i
             else
-                _rand.Next(0, range |> int) + 1 |> uint16 |> write (ret |> debugPrint)
+                _rand.Next(0, range |> int) + 1 |> uint16 |> write i
             );
-        (fun i _ -> (* push*) s.writeVariable (i.args.[0] |> s.vin) 0uy);
-        (fun i _ -> (* pull*)
-            i.args.[0] |> s.vin_direct |> byte |> s.writeVariableIndirect (s.readVariable 0uy));
+        (fun i -> (* push*) s.writeVariable (i.args.[0] |> s.vin) 0uy);
+        (fun i -> (* pull*)
+            i |> read |> byte |> s.writeVariableIndirect (s.readVariable 0uy));
         nulvar; (* split_window*)
         nulvar; (* set_window*)
         nulvar; (* call_vs2*)
@@ -550,10 +550,10 @@ type Machine(filename) = class
 
     let decode ip =
         let op = s.read8 ip
-        (match (op &&& 0xc0uy) >>> 6 with
+        match (op &&& 0xc0uy) >>> 6 with
         | 0x03uy -> decode_var op
         | 0x02uy -> decode_short op
-        | _ -> decode_long op)
+        | _ -> decode_long op
         |> add_return
         |> add_branch
         |> add_print
@@ -566,14 +566,16 @@ type Machine(filename) = class
         | Variable(x) -> sprintf "L%02x" (x - 1uy)
         | Omitted -> ""
 
+    let print_ret = function
+        | Variable(x) when x = 0uy -> " -> -(SP)"
+        | Variable(x) when x >= 0x10uy -> sprintf " -> G%02x" (x - 0x10uy)
+        | Variable(x) -> sprintf " -> L%02x" (x - 1uy)
+        | _ -> ""
+
     let rec print str ret = function
         | h :: g :: t -> print (str + (string_from_operand h) + ",") ret (g :: t)
         | h :: t -> print (str + (string_from_operand h)) ret t
-        | [] -> str + (match ret with
-                        | Variable(x) when x = 0uy -> " -> -(SP)"
-                        | Variable(x) when x >= 0x10uy -> sprintf " -> G%02x" (x - 0x10uy)
-                        | Variable(x) -> sprintf " -> L%02x" (x - 1uy)
-                        | _ -> "")
+        | [] -> str + (print_ret ret)
 
     let disassemble i =
         let names =
@@ -586,22 +588,22 @@ type Machine(filename) = class
 
     let execute i =
         let oldip = ip
-        (match i.optype with
-        | Op0 -> instructions0op.[i.opcode] i i.ret
-        | Op1 -> instructions1op.[i.opcode] i i.args.[0] i.ret
-        | Op2 -> instructions2op.[i.opcode] i i.args.[0] i.args.[1] i.ret
-        | Var -> instructionsvar.[i.opcode] i i.ret)
+        match i.optype with
+        | Op0 -> instructions0op.[i.opcode] i
+        | Op1 -> instructions1op.[i.opcode] i i.args.[0]
+        | Op2 -> instructions2op.[i.opcode] i i.args.[0] i.args.[1]
+        | Var -> instructionsvar.[i.opcode] i
         if ip = oldip then ip + i.length else ip
 
     member _this.Run () =
         while finished <> true do
             ip <- ip
             |> decode
-#if DEBUG
+            #if DEBUG
             |> disassemble
-#endif
+            #endif
             |> execute
 end
 
 do
-    Machine("czech.z3").Run ()
+    Machine("zork.z3").Run ()
