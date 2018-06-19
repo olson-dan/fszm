@@ -268,6 +268,8 @@ type Machine(filename) = class
     let mutable _out = fun (x:string) -> outbuf <- outbuf + x
     let mutable _flush = fun _ -> printf "%s" outbuf; outbuf <- ""
 
+    let mutable _rand = System.Random()
+
     let read2 (x, y) = (s.vin x, s.vin y)
     let read2_i16 (x, y) = (s.vin_i16 x, s.vin_i16 y)
     let read_obj x = x |> s.vin_addr |> s.readObj
@@ -395,7 +397,7 @@ type Machine(filename) = class
         (fun _ _ -> (* rfalse *) ip <- s.ret 0us);
         (fun i _ -> (* print *) i.string |> _out);
         (fun i _ -> (* print_ret *)
-            i.string |> _out
+            i.string + "\n" |> _out
             ip <- s.ret 1us);
         nul0op; (* no *)
         nul0op; (* save *)
@@ -403,10 +405,10 @@ type Machine(filename) = class
         nul0op; (* restart *)
         (fun _ _ -> (* ret_popped *) ip <- s.readVariable 0uy |> s.ret);
         (fun _ _ -> (* pop *) s.readVariable 0uy |> ignore);
-        nul0op; (* quit *)
+        (fun _ _ -> (* quit *) _flush (); finished <- true);
         (fun _ _ -> (* new_line *) "\n" |> _out);
         nul0op; (* show_status *)
-        nul0op; (* verify *)
+        (fun i _ -> (* verify *) true |> jump i);
         nul0op; (* extended *)
         nul0op; (* piracy *)
     |]
@@ -433,8 +435,15 @@ type Machine(filename) = class
         (fun i _ -> (* print_char*)
             i.args.[0] |> s.vin |> char |> sprintf "%c" |> _out);
         (fun i _ -> (* print_num*)
-            i.args.[0] |> s.vin |> sprintf "%d" |> _out);
-        nulvar; (* random*)
+            i.args.[0] |> s.vin_i16 |> sprintf "%d" |> _out);
+        (fun i ret -> (* random*)
+            let range = i.args.[0] |> s.vin_i16
+            if range <= 0s then
+                _rand <- System.Random(range |> int)
+                0us |> write (ret |> debugPrint)
+            else
+                _rand.Next(0, range |> int) + 1 |> uint16 |> write (ret |> debugPrint)
+            );
         (fun i _ -> (* push*) s.writeVariable (i.args.[0] |> s.vin) 0uy);
         (fun i _ -> (* pull*)
             i.args.[0] |> s.vin_direct |> byte |> s.writeVariableIndirect (s.readVariable 0uy));
@@ -500,7 +509,7 @@ type Machine(filename) = class
     let stores opcode = function
         | Op2 -> (opcode >= 0x08 && opcode <= 0x09) || (opcode >= 0x0f && opcode <= 0x19)
         | Op1 -> (opcode >= 0x01 && opcode <= 0x04) || opcode = 0x08 || (opcode >= 0x0e && opcode <= 0x0f)
-        | Var -> opcode = 0x0
+        | Var -> opcode = 0x0 || opcode = 0x7
         | _ -> false
 
     let branches opcode = function
