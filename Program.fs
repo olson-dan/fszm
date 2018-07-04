@@ -272,6 +272,7 @@ type Machine(filename) = class
     let read_addr = read >> s.addr
     let read2 i = (s.vin i.args.[0], s.vin i.args.[1])
     let read2_i16 i = (s.vin_i16 i.args.[0], s.vin_i16 i.args.[1])
+    let read2_dir i = (i.args.[0] |> s.vin |> byte, i.args.[1] |> s.vin)
     let read_obj = read_addr >> uint16 >> s.readObj
     let read_high_addr i = (i.args.[0] |> s.vin) + 2us * (i.args.[1] |> s.vin) |> s.addr
     let read_prop i = (i.args.[1] |> s.vin |> int, i |> read_obj) ||> s.getProp
@@ -280,6 +281,7 @@ type Machine(filename) = class
     let write i x = x |> s.vout i.ret
     let write_i16 i x = x |> uint16 |> s.vout i.ret
     let write_obj o = s.writeObj o
+    let write_indirect x y = s.writeVariableIndirect y x
 
     let jump (i:instruction) x =
         if x = i.compare then
@@ -331,10 +333,8 @@ type Machine(filename) = class
         (fun i y -> (* clear_attr *)
             let o = i |> read_obj
             { o with attrib=o.attrib &&& ~~~(attr_bit y) } |> write_obj);
-        (fun i y -> (* store *)
-            i |> read |> byte |> s.writeVariableIndirect (y |> s.vin));
-        (fun i y -> (* insert_obj *)
-            (i |> read_obj, y |> s.vin) ||> s.insertObj);
+        (fun i y -> (* store *) i |> read2_dir ||> write_indirect);
+        (fun i y -> (* insert_obj *) (i |> read_obj, y |> s.vin) ||> s.insertObj);
         (fun i _ -> (* loadw *) i |> read_high_addr |> s.read16 |> write i);
         (fun i _ -> (* loadb *)
             i |> read2 ||> (+) |> s.addr |> s.read8 |> uint16 |> write i);
@@ -599,4 +599,4 @@ type Machine(filename) = class
 end
 
 do
-    Machine("zork.z3").Run ()
+    Machine("czech.z3").Run ()
