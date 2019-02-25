@@ -15,10 +15,9 @@ type instruction = { opcode:int; optype:encoding; length:int; args:operand array
 let emptyInstruction = {opcode=0; optype=Op0; length=0; args=[||]; ret=Omitted; string=""; offset=0; compare=false }
 
 let debugPrint x = printfn "%A" x; x
-
 let inline (|>>) a b = b a |> ignore; a
 
-type Story(filename) = class
+type Story(filename) =
     let mem = File.ReadAllBytes(filename)
     let _read8 off = mem.[off]
     let _read16 off = (mem.[off] |> uint16 <<< 8) ||| (mem.[off+1] |> uint16)
@@ -255,9 +254,8 @@ type Story(filename) = class
 
     member _this.parseInput _max_parse (_input : string) =
         ()
-end
 
-type Machine(filename) = class
+type Machine(filename) =
     let s = Story(filename)
     let mutable ip = s.read16 0x6 |> int
     let mutable finished = false
@@ -419,7 +417,7 @@ type Machine(filename) = class
         (fun i -> (* storew*)
             i |> read_high_addr |> s.write16 (i.args.[2] |> s.vin));
         (fun i -> (* storeb*)
-            i |> read_high_addr |> s.write8 (i.args.[2] |> s.vin));
+            i |> read2 ||> (+) |> s.addr |> s.write8 (i.args.[2] |> s.vin));
         (fun i -> (* put_prop*)
             i |> read_prop |> s.writeProp (i.args.[2] |> s.vin));
         (fun i -> (* sread*)
@@ -596,7 +594,6 @@ type Machine(filename) = class
             |> disassemble
             #endif
             |> execute
-end
 
 do
-    Machine("czech.z3").Run ()
+    Machine("zork.z3").Run ()
